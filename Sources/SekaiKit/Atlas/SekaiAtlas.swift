@@ -56,6 +56,12 @@ public final class SekaiAtlas: @unchecked Sendable {
     private let featureIndexes: [SekaiFeatureID: Int]
     private let sovereignIndexes: [SekaiFeatureID: Int]
     private let countryIndexes: [SekaiFeatureID: Int]
+    private let spatialIndexLock = NSLock()
+    private var spatialPointRanks: [Int32]?
+    private let geometryCacheLock = NSLock()
+    private var particleGeometryCache: [ParticleGeometryKey: [PackedParticle]] = [:]
+    private var boundaryLineCache: [BoundaryGeometryKey: [PackedParticle]] = [:]
+    private var boundaryFillCache: [BoundaryGeometryKey: [PackedParticle]] = [:]
 
     public convenience init() throws {
         guard let url = Bundle.module.url(forResource: "SekaiWorld", withExtension: "sekaiatlas") else {
@@ -106,6 +112,75 @@ public final class SekaiAtlas: @unchecked Sendable {
 
     public func feature(id: SekaiFeatureID) -> SekaiFeature? {
         featureIndexes[id].map { features[$0] }
+    }
+
+    public func features(matching filter: SekaiRegionFilter) -> [SekaiFeature] {
+        selectedFeatureIndexes(for: filter).sorted().map { features[$0] }
+    }
+
+    /// Returns the nearest land feature using the atlas particle index.
+    /// Ocean coordinates farther than `maximumDistanceDegrees` return `nil`.
+    public func feature(
+        nearest coordinate: SekaiCoordinate,
+        maximumDistanceDegrees: Double = 2.5
+    ) -> SekaiFeature? {
+        nearestFeature(
+            nearest: coordinate,
+            among: nil,
+            maximumDistanceDegrees: maximumDistanceDegrees
+        )
+    }
+
+    func feature(
+        nearest coordinate: SekaiCoordinate,
+        among allowedFeatureIDs: Set<SekaiFeatureID>,
+        maximumDistanceDegrees: Double = 2.5
+    ) -> SekaiFeature? {
+        nearestFeature(
+            nearest: coordinate,
+            among: allowedFeatureIDs,
+            maximumDistanceDegrees: maximumDistanceDegrees
+        )
+    }
+
+    private func nearestFeature(
+        nearest coordinate: SekaiCoordinate,
+        among allowedFeatureIDs: Set<SekaiFeatureID>?,
+        maximumDistanceDegrees: Double
+    ) -> SekaiFeature? {
+        let ranks = indexedPointRanks()
+        let latitudeCell = min(max(Int(floor(coordinate.latitude + 90)), 0), 179)
+        let longitudeCell = min(max(Int(floor(coordinate.longitude + 180)), 0), 359)
+        let searchRadius = max(1, Int(ceil(maximumDistanceDegrees)))
+        var best: (distance: Double, featureIndex: Int)?
+
+        for latitudeOffset in -searchRadius...searchRadius {
+            let latitude = latitudeCell + latitudeOffset
+            guard (0..<180).contains(latitude) else { continue }
+            for longitudeOffset in -searchRadius...searchRadius {
+                let longitude = (longitudeCell + longitudeOffset + 360) % 360
+                let base = (latitude * 360 + longitude) * 16
+                for slot in 0..<16 {
+                    let rank = Int(ranks[base + slot])
+                    guard rank >= 0 else { continue }
+                    let candidate = point(at: rank)
+                    if let allowedFeatureIDs,
+                       !allowedFeatureIDs.contains(features[candidate.featureIndex].id) {
+                        continue
+                    }
+                    let distance = Self.angularDistanceDegrees(coordinate, candidate.coordinate)
+                    if distance <= maximumDistanceDegrees,
+                       best == nil || distance < best!.distance {
+                        best = (distance, candidate.featureIndex)
+                    }
+                }
+            }
+        }
+        return best.map { features[$0.featureIndex] }
+    }
+
+    func prepareSpatialIndex() {
+        _ = indexedPointRanks()
     }
 
     public func search(_ query: String, locale: Locale = .current) -> [SekaiFeature] {
@@ -169,6 +244,13 @@ public final class SekaiAtlas: @unchecked Sendable {
         density: SekaiParticleDensity,
         automaticLimit: Int
     ) -> [PackedParticle] {
+        let cacheKey = ParticleGeometryKey(filter: filter, density: density, automaticLimit: automaticLimit)
+        geometryCacheLock.lock()
+        if let cached = particleGeometryCache[cacheKey] {
+            geometryCacheLock.unlock()
+            return cached
+        }
+        geometryCacheLock.unlock()
         let limit: Int
         switch density {
         case .maximum: limit = .max
@@ -191,12 +273,25 @@ public final class SekaiAtlas: @unchecked Sendable {
             ))
             if limit != .max, output.count == limit { break }
         }
+        geometryCacheLock.lock()
+        if particleGeometryCache.count >= 6, let oldest = particleGeometryCache.keys.first {
+            particleGeometryCache.removeValue(forKey: oldest)
+        }
+        particleGeometryCache[cacheKey] = output
+        geometryCacheLock.unlock()
         return output
     }
 
     func packedBoundaryVertices(matching filter: SekaiRegionFilter, levelOfDetail: Int) -> [PackedParticle] {
         let selected = selectedFeatureIndexes(for: filter)
         let lod = UInt8(min(max(levelOfDetail, 0), 2))
+        let cacheKey = BoundaryGeometryKey(filter: filter, levelOfDetail: Int(lod))
+        geometryCacheLock.lock()
+        if let cached = boundaryLineCache[cacheKey] {
+            geometryCacheLock.unlock()
+            return cached
+        }
+        geometryCacheLock.unlock()
         var output: [PackedParticle] = []
         output.reserveCapacity(min(header.lineSegmentCount * 2, 2_000_000))
         for index in 0..<header.lineSegmentCount {
@@ -205,12 +300,22 @@ public final class SekaiAtlas: @unchecked Sendable {
             output.append(PackedParticle(quantizedLatitude: data.uint16(at: offset + 4), quantizedLongitude: data.uint16(at: offset + 6)))
             output.append(PackedParticle(quantizedLatitude: data.uint16(at: offset + 8), quantizedLongitude: data.uint16(at: offset + 10)))
         }
+        geometryCacheLock.lock()
+        boundaryLineCache[cacheKey] = output
+        geometryCacheLock.unlock()
         return output
     }
 
     func packedBoundaryFillVertices(matching filter: SekaiRegionFilter, levelOfDetail: Int) -> [PackedParticle] {
         let selected = selectedFeatureIndexes(for: filter)
         let lod = UInt8(min(max(levelOfDetail, 0), 2))
+        let cacheKey = BoundaryGeometryKey(filter: filter, levelOfDetail: Int(lod))
+        geometryCacheLock.lock()
+        if let cached = boundaryFillCache[cacheKey] {
+            geometryCacheLock.unlock()
+            return cached
+        }
+        geometryCacheLock.unlock()
         var output: [PackedParticle] = []
         for recordIndex in 0..<header.meshRecordCount {
             let recordOffset = header.meshRecordsOffset + recordIndex * 20
@@ -228,6 +333,9 @@ public final class SekaiAtlas: @unchecked Sendable {
                 ))
             }
         }
+        geometryCacheLock.lock()
+        boundaryFillCache[cacheKey] = output
+        geometryCacheLock.unlock()
         return output
     }
 
@@ -243,6 +351,39 @@ public final class SekaiAtlas: @unchecked Sendable {
         case let .mapUnit(id): featureIndexes[id].map { Set([$0]) } ?? []
         case let .features(ids): Set(ids.compactMap { featureIndexes[$0] })
         }
+    }
+
+    private func indexedPointRanks() -> [Int32] {
+        spatialIndexLock.lock()
+        defer { spatialIndexLock.unlock() }
+        if let spatialPointRanks { return spatialPointRanks }
+
+        var result = [Int32](repeating: -1, count: 180 * 360 * 16)
+        for rank in 0..<header.pointCount {
+            let record = point(at: rank)
+            let coordinate = record.coordinate
+            let latitudeValue = min(max(coordinate.latitude + 90, 0), 179.999_999)
+            let longitudeValue = min(max(coordinate.longitude + 180, 0), 359.999_999)
+            let latitudeCell = Int(latitudeValue)
+            let longitudeCell = Int(longitudeValue)
+            let latitudeSubcell = min(Int((latitudeValue - floor(latitudeValue)) * 4), 3)
+            let longitudeSubcell = min(Int((longitudeValue - floor(longitudeValue)) * 4), 3)
+            let slot = latitudeSubcell * 4 + longitudeSubcell
+            result[(latitudeCell * 360 + longitudeCell) * 16 + slot] = Int32(rank)
+        }
+        spatialPointRanks = result
+        return result
+    }
+
+    private static func angularDistanceDegrees(_ first: SekaiCoordinate, _ second: SekaiCoordinate) -> Double {
+        let firstLatitude = first.latitude * .pi / 180
+        let secondLatitude = second.latitude * .pi / 180
+        let latitudeDelta = (second.latitude - first.latitude) * .pi / 180
+        let longitudeDelta = SekaiCoordinate.normalizedLongitude(second.longitude - first.longitude) * .pi / 180
+        let a = sin(latitudeDelta * 0.5) * sin(latitudeDelta * 0.5)
+            + cos(firstLatitude) * cos(secondLatitude)
+            * sin(longitudeDelta * 0.5) * sin(longitudeDelta * 0.5)
+        return 2 * atan2(sqrt(a), sqrt(max(0, 1 - a))) * 180 / .pi
     }
 
     private func point(at rank: Int) -> PointRecord {
@@ -299,6 +440,17 @@ public final class SekaiAtlas: @unchecked Sendable {
             localizedNames: unit.names, worldviewClassifications: unit.worldview
         )
     }
+}
+
+private struct ParticleGeometryKey: Hashable {
+    let filter: SekaiRegionFilter
+    let density: SekaiParticleDensity
+    let automaticLimit: Int
+}
+
+private struct BoundaryGeometryKey: Hashable {
+    let filter: SekaiRegionFilter
+    let levelOfDetail: Int
 }
 
 struct PackedParticle: Sendable {

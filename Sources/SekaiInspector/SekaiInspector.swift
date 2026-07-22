@@ -20,6 +20,9 @@ public struct SekaiInspectorOptions: Equatable, Sendable {
     public var performance: SekaiPerformancePolicy
     public var showsAnnotations: Bool
     public var showsRoutes: Bool
+    public var showsLabels: Bool
+    public var showsGeometryExamples: Bool
+    public var showsHeatmap: Bool
 
     public init(
         filter: SekaiRegionFilter = .allLand,
@@ -28,11 +31,36 @@ public struct SekaiInspectorOptions: Equatable, Sendable {
         showsAnnotations: Bool = true,
         showsRoutes: Bool = true
     ) {
+        self.init(
+            filter: filter,
+            presentation: presentation,
+            performance: performance,
+            showsAnnotations: showsAnnotations,
+            showsRoutes: showsRoutes,
+            showsLabels: false,
+            showsGeometryExamples: false,
+            showsHeatmap: false
+        )
+    }
+
+    public init(
+        filter: SekaiRegionFilter = .allLand,
+        presentation: SekaiInspectorPresentation = .particles,
+        performance: SekaiPerformancePolicy = .adaptive(),
+        showsAnnotations: Bool = true,
+        showsRoutes: Bool = true,
+        showsLabels: Bool,
+        showsGeometryExamples: Bool = false,
+        showsHeatmap: Bool = false
+    ) {
         self.filter = filter
         self.presentation = presentation
         self.performance = performance
         self.showsAnnotations = showsAnnotations
         self.showsRoutes = showsRoutes
+        self.showsLabels = showsLabels
+        self.showsGeometryExamples = showsGeometryExamples
+        self.showsHeatmap = showsHeatmap
     }
 }
 
@@ -42,6 +70,8 @@ public struct SekaiInspector: View {
     @Binding private var style: SekaiStyle
     @Binding private var interaction: SekaiInteractionOptions
     @Binding private var options: SekaiInspectorOptions
+    private let selection: Binding<SekaiSelection?>?
+    private let metrics: SekaiRenderMetrics?
     private let reset: () -> Void
 
     public init(
@@ -55,6 +85,43 @@ public struct SekaiInspector: View {
         _style = style
         _interaction = interaction
         _options = options
+        selection = nil
+        metrics = nil
+        self.reset = reset
+    }
+
+    public init(
+        camera: Binding<SekaiCamera>,
+        style: Binding<SekaiStyle>,
+        interaction: Binding<SekaiInteractionOptions>,
+        options: Binding<SekaiInspectorOptions>,
+        selection: Binding<SekaiSelection?>,
+        metrics: SekaiRenderMetrics? = nil,
+        reset: @escaping () -> Void = {}
+    ) {
+        _camera = camera
+        _style = style
+        _interaction = interaction
+        _options = options
+        self.selection = selection
+        self.metrics = metrics
+        self.reset = reset
+    }
+
+    public init(
+        camera: Binding<SekaiCamera>,
+        style: Binding<SekaiStyle>,
+        interaction: Binding<SekaiInteractionOptions>,
+        options: Binding<SekaiInspectorOptions>,
+        metrics: SekaiRenderMetrics,
+        reset: @escaping () -> Void = {}
+    ) {
+        _camera = camera
+        _style = style
+        _interaction = interaction
+        _options = options
+        selection = nil
+        self.metrics = metrics
         self.reset = reset
     }
 
@@ -94,6 +161,7 @@ public struct SekaiInspector: View {
                     slider("Brightness", value: $style.particles.brightness, range: 0...2, icon: "sun.max")
                     slider("Highlight", value: $style.particles.highlight, range: 0...1, icon: "sparkles")
                     slider("Refraction", value: $style.particles.refraction, range: 0...1, icon: "circle.hexagongrid")
+                    Toggle("Labels", isOn: $options.showsLabels)
                 }
                 Section("GLOBE") {
                     Picker("Material", selection: $style.globe.material) {
@@ -107,9 +175,17 @@ public struct SekaiInspector: View {
                 Section("OVERLAYS") {
                     Toggle("Markers", isOn: $options.showsAnnotations)
                     Toggle("Routes", isOn: $options.showsRoutes)
+                    Toggle("Polygons and Circles", isOn: $options.showsGeometryExamples)
+                    Toggle("Heatmap", isOn: $options.showsHeatmap)
                     slider("Marker Size", value: $style.annotations.size, range: 0.25...3, icon: "mappin")
                     slider("Route Width", value: $style.routes.width, range: 0.25...4, icon: "point.topleft.down.curvedto.point.bottomright.up")
                     slider("Route Elevation", value: $style.routes.elevation, range: 0...0.5, icon: "arrow.up.circle")
+                    slider("Route Progress", value: $style.routes.progress, range: 0...1, icon: "chart.bar.fill")
+                    Picker("Route Pattern", selection: routePattern) {
+                        Text("Solid").tag(0)
+                        Text("Dashed").tag(1)
+                    }
+                    slider("Endpoint Size", value: $style.routes.endpointSize, range: 0...0.2, icon: "circle.circle")
                 }
                 Section("ENVIRONMENT") {
                     Toggle("Stars", isOn: $style.environment.showsStars)
@@ -122,6 +198,21 @@ public struct SekaiInspector: View {
                     slider("Speed", value: $interaction.autoRotationSpeed, range: -1...1, icon: "rotate.3d")
                     Toggle("Stop After Interaction", isOn: $interaction.stopsAutoRotationOnInteraction)
                 }
+                Section("INTERACTION") {
+                    Toggle("Selection", isOn: $interaction.allowsSelection)
+                    Toggle("Rotation", isOn: $interaction.allowsRotation)
+                    Toggle("Zoom", isOn: $interaction.allowsZoom)
+                    slider("Inertia", value: $interaction.inertia, range: 0...0.98, icon: "move.3d")
+                    if let selection = selection?.wrappedValue {
+                        LabeledContent("Selected", value: selectionName(selection))
+                        if case let .atlas(id) = selection,
+                           let feature = SekaiAtlas.bundled.feature(id: id) {
+                            Button("Fit Selected Region", systemImage: "viewfinder") {
+                                camera.fit(feature, limits: interaction.cameraBounds)
+                            }
+                        }
+                    }
+                }
                 Section("CAMERA") {
                     Picker("Projection", selection: projectionMode) {
                         Text("Orthographic").tag(0)
@@ -130,6 +221,14 @@ public struct SekaiInspector: View {
                     slider("Zoom", value: $camera.zoom, range: interaction.cameraBounds.minimumZoom...interaction.cameraBounds.maximumZoom, icon: "plus.magnifyingglass")
                     slider("Horizontal Offset", value: $camera.offsetX, range: -1...1, icon: "arrow.left.and.right")
                     slider("Vertical Offset", value: $camera.offsetY, range: -1...1, icon: "arrow.up.and.down")
+                }
+                if let metrics {
+                    Section("PERFORMANCE") {
+                        LabeledContent("Frame Rate", value: "\(Int(metrics.framesPerSecond.rounded())) FPS")
+                        LabeledContent("Particles", value: metrics.renderedParticleCount.formatted())
+                        LabeledContent("Requested", value: metrics.requestedParticleCount.formatted())
+                        LabeledContent("Boundary LOD", value: metrics.levelOfDetail.formatted())
+                    }
                 }
             }
             .navigationTitle("Sekai")
@@ -198,6 +297,23 @@ public struct SekaiInspector: View {
 
     private var autoRotate: Binding<Bool> {
         Binding { interaction.autoRotationSpeed != 0 } set: { interaction.autoRotationSpeed = $0 ? 0.08 : 0 }
+    }
+
+    private var routePattern: Binding<Int> {
+        Binding {
+            if case .solid = style.routes.pattern { 0 } else { 1 }
+        } set: {
+            style.routes.pattern = $0 == 0 ? .solid : .dashed(length: 0.055, gap: 0.035)
+        }
+    }
+
+    private func selectionName(_ selection: SekaiSelection) -> String {
+        switch selection {
+        case let .atlas(id): SekaiAtlas.bundled.feature(id: id)?.name ?? id.rawValue
+        case let .annotation(id): id
+        case let .route(id): id
+        case let .custom(_, featureID): featureID
+        }
     }
 
     @ViewBuilder private func slider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, icon: String) -> some View {

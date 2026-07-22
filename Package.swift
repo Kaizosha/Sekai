@@ -39,7 +39,7 @@ let package = Package(
         ),
         .testTarget(
             name: "SekaiKitTests",
-            dependencies: ["SekaiKit"]
+            dependencies: ["SekaiKit", "SekaiGeoJSON"]
         )
     ],
     swiftLanguageModes: [.v6]

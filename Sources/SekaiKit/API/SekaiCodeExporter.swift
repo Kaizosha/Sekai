@@ -8,9 +8,10 @@ public enum SekaiCodeExporter {
 
     struct GlobeView: View {
         @State private var camera = SekaiCamera.standard
+        @State private var selection: SekaiSelection?
 
         var body: some View {
-            Sekai(camera: $camera) {
+            Sekai(camera: $camera, selection: $selection) {
                 SekaiLayer.landParticles()
             }
             .aspectRatio(1, contentMode: .fit)
@@ -34,6 +35,7 @@ public enum SekaiCodeExporter {
 
         struct GlobeView: View {
             @State private var camera = SekaiCamera.standard
+            @State private var selection: SekaiSelection?
             private var particles: SekaiParticleStyle {
                 var value = SekaiParticleStyle.standard
                 value.density = \(densityCode)
@@ -41,7 +43,7 @@ public enum SekaiCodeExporter {
             }
 
             var body: some View {
-                Sekai(camera: $camera) {
+                Sekai(camera: $camera, selection: $selection) {
                     SekaiLayer.landParticles(filter: \(filterCode), style: particles)\(boundary)
                 }
             }

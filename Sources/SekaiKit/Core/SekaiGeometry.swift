@@ -88,6 +88,38 @@ public struct SekaiQuaternion: Codable, Equatable, Sendable {
         )
     }
 
+    public var inverse: Self {
+        Self(x: -x, y: -y, z: -z, w: w)
+    }
+
+    public static func slerp(_ start: Self, _ end: Self, progress: Double) -> Self {
+        let t = min(max(progress.isFinite ? progress : 0, 0), 1)
+        var destination = end
+        var cosine = start.x * end.x + start.y * end.y + start.z * end.z + start.w * end.w
+        if cosine < 0 {
+            cosine = -cosine
+            destination = Self(uncheckedX: -end.x, y: -end.y, z: -end.z, w: -end.w)
+        }
+        guard cosine < 0.9995 else {
+            return Self(
+                x: start.x + (destination.x - start.x) * t,
+                y: start.y + (destination.y - start.y) * t,
+                z: start.z + (destination.z - start.z) * t,
+                w: start.w + (destination.w - start.w) * t
+            )
+        }
+        let angle = acos(min(max(cosine, -1), 1))
+        let denominator = sin(angle)
+        let a = sin((1 - t) * angle) / denominator
+        let b = sin(t * angle) / denominator
+        return Self(
+            x: start.x * a + destination.x * b,
+            y: start.y * a + destination.y * b,
+            z: start.z * a + destination.z * b,
+            w: start.w * a + destination.w * b
+        )
+    }
+
     private init(uncheckedX x: Double, y: Double, z: Double, w: Double) {
         self.x = x
         self.y = y
@@ -139,6 +171,14 @@ struct SekaiVector3: Equatable, Sendable {
         )
     }
 
+    var coordinate: SekaiCoordinate {
+        let value = normalized()
+        return SekaiCoordinate(
+            latitude: asin(min(max(value.y, -1), 1)) * 180 / .pi,
+            longitude: atan2(value.x, value.z) * 180 / .pi
+        )
+    }
+
     static func + (left: Self, right: Self) -> Self {
         Self(x: left.x + right.x, y: left.y + right.y, z: left.z + right.z)
     }
@@ -150,8 +190,16 @@ struct SekaiVector3: Equatable, Sendable {
     static func slerp(_ start: Self, _ end: Self, progress: Double) -> Self {
         let a = start.normalized()
         let b = end.normalized()
+        let progress = min(max(progress.isFinite ? progress : 0, 0), 1)
         let angle = acos(min(max(a.dot(b), -1), 1))
         guard angle > 0.000_001 else { return a }
+        if .pi - angle < 0.000_001 {
+            let reference = abs(a.y) < 0.9
+                ? Self(x: 0, y: 1, z: 0)
+                : Self(x: 1, y: 0, z: 0)
+            let orthogonal = a.cross(reference).normalized()
+            return (a * cos(.pi * progress) + orthogonal * sin(.pi * progress)).normalized()
+        }
         let denominator = sin(angle)
         return (a * (sin((1 - progress) * angle) / denominator)
             + b * (sin(progress * angle) / denominator)).normalized()

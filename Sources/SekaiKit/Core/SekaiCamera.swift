@@ -55,6 +55,66 @@ public struct SekaiCamera: Codable, Equatable, Sendable {
         orientation = .lookingAt(coordinate)
     }
 
+    public func focused(on coordinate: SekaiCoordinate) -> Self {
+        var result = self
+        result.focus(on: coordinate)
+        return result
+    }
+
+    public mutating func fit(
+        _ bounds: SekaiCoordinateBounds,
+        padding: Double = 0.12,
+        limits: SekaiCameraBounds = .standard
+    ) {
+        let west = bounds.west
+        let unwrappedEast = bounds.east < west ? bounds.east + 360 : bounds.east
+        let longitudeSpan = min(max(unwrappedEast - west, 0), 360)
+        let latitudeSpan = min(max(bounds.north - bounds.south, 0), 180)
+        let center = SekaiCoordinate(
+            latitude: (bounds.south + bounds.north) * 0.5,
+            longitude: west + longitudeSpan * 0.5
+        )
+        focus(on: center)
+        let correctedLongitudeSpan = longitudeSpan * max(cos(center.latitude * .pi / 180), 0.2)
+        let angularRadius = min(max(latitudeSpan, correctedLongitudeSpan) * .pi / 360, .pi / 2)
+        let projectedRadius = max(sin(angularRadius), 0.035)
+        zoom = (1 - min(max(padding, 0), 0.8)) / projectedRadius
+        offsetX = 0
+        offsetY = 0
+        clamp(to: limits)
+    }
+
+    public mutating func fit(
+        _ feature: SekaiFeature,
+        padding: Double = 0.12,
+        limits: SekaiCameraBounds = .standard
+    ) {
+        fit(feature.bounds, padding: padding, limits: limits)
+    }
+
+    public func fitted(
+        to bounds: SekaiCoordinateBounds,
+        padding: Double = 0.12,
+        limits: SekaiCameraBounds = .standard
+    ) -> Self {
+        var result = self
+        result.fit(bounds, padding: padding, limits: limits)
+        return result
+    }
+
+    public func interpolated(to destination: Self, progress: Double) -> Self {
+        let t = min(max(progress.isFinite ? progress : 0, 0), 1)
+        let startZoom = max(zoom, 0.0001)
+        let endZoom = max(destination.zoom, 0.0001)
+        return Self(
+            orientation: .slerp(orientation, destination.orientation, progress: t),
+            zoom: exp(log(startZoom) + (log(endZoom) - log(startZoom)) * t),
+            projection: t < 0.5 ? projection : destination.projection,
+            offsetX: offsetX + (destination.offsetX - offsetX) * t,
+            offsetY: offsetY + (destination.offsetY - offsetY) * t
+        )
+    }
+
     public mutating func clamp(to bounds: SekaiCameraBounds) {
         zoom = min(max(zoom, bounds.minimumZoom), bounds.maximumZoom)
     }

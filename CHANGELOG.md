@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.0
+
+- Added atlas, annotation, route, polygon, circle, heat-point, and hover hit
+  testing through stable `SekaiSelection` bindings.
+- Added inertial quaternion dragging and a pause-safe shared rotation clock.
+- Added feature and antimeridian-aware camera fitting, camera interpolation,
+  and cancellable `SekaiCameraController` flights.
+- Added measured adaptive particle submission with hysteresis, three boundary
+  LODs, and accurate logical-versus-submitted render metrics.
+- Added independent per-layer Metal batches and optical materials.
+- Completed route progress, dash patterns, elevated arcs, widths, and endpoint
+  rendering.
+- Added collision-managed native-glass labels, concave polygon fills, polygon
+  holes, geodesic circles, heat points, and physical boundary lines.
+- Added GeoJSON marker, line, and polygon style conversion.
+- Expanded the Demo inspector and behavioral test suite.
+
 ## 1.0.0
 
 - Added a SwiftUI-first globe for all current Apple platforms.

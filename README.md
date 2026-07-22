@@ -39,7 +39,7 @@ products the app uses:
 - `SekaiInspector`: optional development inspector and demo
 
 ```swift
-.package(url: "https://github.com/Kaizosha/Sekai.git", from: "1.0.0")
+.package(url: "https://github.com/Kaizosha/Sekai.git", from: "1.1.0")
 ```
 
 ## Minimal Use
@@ -50,9 +50,10 @@ import SwiftUI
 
 struct GlobeView: View {
     @State private var camera = SekaiCamera.standard
+    @State private var selection: SekaiSelection?
 
     var body: some View {
-        Sekai(camera: $camera) {
+        Sekai(camera: $camera, selection: $selection) {
             SekaiLayer.landParticles()
         }
         .aspectRatio(1, contentMode: .fit)
@@ -85,10 +86,10 @@ Sekai(camera: $camera, style: style, interaction: interaction) {
 }
 ```
 
-Built-in layer values cover particles, boundaries, physical features,
-annotations, routes, polylines, polygons, circles, heat points, labels,
-textures, and user location. Unsupported visual layers remain data values until
-their renderer is enabled; this lets hosts persist one scene schema.
+Particles, boundaries, annotations, routes, polylines, polygons, geodesic
+circles, heat points, collision-managed labels, physical boundary lines, and
+user location render directly. Texture values remain reserved scene schema for
+a future raster product.
 
 ## Geography
 
@@ -118,7 +119,9 @@ Density is explicit:
 - `.maximum`: every available source point, with no hidden cap
 
 All modes select deterministic prefixes from the same master hierarchy, so
-changing density never changes the underlying map.
+changing density never changes the underlying map. Adaptive policy can submit a
+smaller prefix to maintain its frame target; use `.exact` when every requested
+point must reach the GPU.
 
 ## Camera And Interaction
 
@@ -129,6 +132,8 @@ vertical drag. Its state includes projection, zoom, and screen offset.
 var interaction = SekaiInteractionOptions(
     allowsRotation: true,
     allowsZoom: true,
+    allowsSelection: true,
+    inertia: 0.88,
     autoRotationSpeed: 0.08,
     stopsAutoRotationOnInteraction: false
 )
@@ -138,8 +143,14 @@ Touching the globe does not disable rotation unless
 `stopsAutoRotationOnInteraction` is explicitly enabled. Automatic rotation,
 particles, boundaries, routes, and markers share one GPU transform.
 
-Projection modes are `.orthographic` and `.perspective(fieldOfViewDegrees:)`.
-Camera zoom is constrained by `SekaiCameraBounds`.
+Tap and pointer hit testing write stable atlas, annotation, route, or custom IDs
+through the optional `selection` and `hoverSelection` bindings. Projection
+modes are `.orthographic` and `.perspective(fieldOfViewDegrees:)`. Camera zoom
+is constrained by `SekaiCameraBounds`.
+
+`SekaiCamera.fit(_:padding:limits:)` frames features and antimeridian-crossing
+bounds. `SekaiCameraController` provides cancellable quaternion-slerped camera
+flights without pole flips.
 
 ## Styling
 
@@ -169,13 +180,15 @@ appearance without view-count stalls.
 
 ## Performance Policy
 
-- `.adaptive(minimumFramesPerSecond:)`: selects an interactive source count and
-  can evolve render scale or LOD in documented releases
+- `.adaptive(minimumFramesPerSecond:)`: measures rolling frame rate and adjusts
+  submitted particle prefixes plus boundary LOD with hysteresis
 - `.exact`: honors requested source detail; `.maximum` remains maximum
 - `.batterySaver`: uses a smaller automatic count and 30 FPS presentation
 
-Explicit `.count`, `.fraction`, and `.maximum` density values are never silently
-changed. Static globes pause `MTKView` and perform no continuous frame work.
+Explicit `.count`, `.fraction`, and `.maximum` values always preserve their
+logical request. Adaptive policy may submit fewer points temporarily and reports
+both counts through `SekaiRenderMetrics`; `.exact` submits the complete request.
+Static globes pause `MTKView` and perform no continuous frame work.
 watchOS uses a capped Canvas presentation while preserving the same atlas and
 public scene model.
 
@@ -191,7 +204,8 @@ let group = try SekaiGeoJSON.decode(data, layerID: "earthquakes")
 
 FeatureCollection, Feature, Point, MultiPoint, LineString, MultiLineString,
 Polygon, and MultiPolygon are decoded with `JSONSerialization` into typed Sekai
-layers.
+layers. Simple-style marker, stroke, fill, width, and opacity properties become
+native Sekai optical styles.
 
 ### Location
 

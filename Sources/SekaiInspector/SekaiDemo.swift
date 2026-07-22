@@ -7,13 +7,22 @@ public struct SekaiDemo: View {
     @State private var style = SekaiDemoDefaults.style
     @State private var interaction = SekaiInteractionOptions(autoRotationSpeed: 0.08)
     @State private var options = SekaiInspectorOptions(performance: .exact)
+    @State private var selection: SekaiSelection?
+    @State private var metrics = SekaiRenderMetrics()
     @State private var showsInspector = true
 
     public init() {}
 
     public var body: some View {
         NavigationStack {
-            Sekai(camera: $camera, style: style, interaction: interaction, performance: options.performance) {
+            Sekai(
+                camera: $camera,
+                selection: $selection,
+                style: style,
+                interaction: interaction,
+                performance: options.performance,
+                metrics: $metrics
+            ) {
                 if options.presentation != .boundaries {
                     SekaiLayer.landParticles(filter: options.filter, style: style.particles)
                 }
@@ -26,6 +35,16 @@ public struct SekaiDemo: View {
                 if options.showsAnnotations {
                     SekaiLayer.annotations(id: "demo.places", values: SekaiDemoDefaults.annotations)
                 }
+                if options.showsLabels {
+                    SekaiLayer.labels(id: "demo.labels", filter: options.filter, style: style.labels)
+                }
+                if options.showsGeometryExamples {
+                    SekaiLayer.polygons(id: "demo.polygons", values: SekaiDemoDefaults.polygons)
+                    SekaiLayer.circles(id: "demo.circles", values: SekaiDemoDefaults.circles)
+                }
+                if options.showsHeatmap {
+                    SekaiLayer.heatmap(id: "demo.heat", values: SekaiDemoDefaults.heatPoints)
+                }
             }
             .padding()
             .navigationTitle("Sekai")
@@ -37,11 +56,19 @@ public struct SekaiDemo: View {
             }
         }
         .sheet(isPresented: $showsInspector) {
-            SekaiInspector(camera: $camera, style: $style, interaction: $interaction, options: $options) {
+            SekaiInspector(
+                camera: $camera,
+                style: $style,
+                interaction: $interaction,
+                options: $options,
+                selection: $selection,
+                metrics: metrics
+            ) {
                 camera = .standard
                 style = SekaiDemoDefaults.style
                 interaction = .init(autoRotationSpeed: 0.08)
                 options = .init(performance: .exact)
+                selection = nil
             }
             .safeAreaInset(edge: .bottom) {
                 #if os(tvOS)
@@ -92,5 +119,42 @@ private enum SekaiDemoDefaults {
     static let routes = [
         SekaiRoute(id: "chicago-tokyo", from: chicago, to: tokyo),
         SekaiRoute(id: "paris-tokyo", from: paris, to: tokyo)
+    ]
+    static let polygons = [
+        SekaiPolygon(
+            id: "pacific-zone",
+            rings: [[
+                .init(latitude: 18, longitude: -165),
+                .init(latitude: 38, longitude: -145),
+                .init(latitude: 25, longitude: -122),
+                .init(latitude: 6, longitude: -142)
+            ]],
+            style: .init(
+                fillColor: .fixed(.cyan),
+                fillOpacity: 0.2,
+                strokeColor: .fixed(.cyan),
+                strokeOpacity: 0.85,
+                strokeWidth: 1.5
+            )
+        )
+    ]
+    static let circles = [
+        SekaiCircle(
+            id: "chicago-range",
+            center: chicago,
+            radiusKilometers: 1_200,
+            style: .init(
+                fillColor: .fixed(.red),
+                fillOpacity: 0.12,
+                strokeColor: .fixed(.red),
+                strokeOpacity: 0.8,
+                strokeWidth: 1.2
+            )
+        )
+    ]
+    static let heatPoints = [
+        SekaiHeatPoint(id: "chicago", coordinate: chicago, weight: 0.65),
+        SekaiHeatPoint(id: "tokyo", coordinate: tokyo, weight: 1),
+        SekaiHeatPoint(id: "paris", coordinate: paris, weight: 0.8)
     ]
 }

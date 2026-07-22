@@ -1,8 +1,9 @@
 # Testing And Release
 
 Unit tests validate atlas integrity, hierarchy filtering, deterministic density,
-multipart countries, antimeridian bounds, quaternion normalization, Codable
-state, and layer order.
+multipart countries, antimeridian bounds, quaternion interpolation, projection
+round trips, camera fitting, reverse lookup, polygon holes, styled GeoJSON,
+selection geometry, Codable state, and renderer layer order.
 
 Before release:
 
@@ -10,8 +11,8 @@ Before release:
 2. Run `swift test` from a clean clone.
 3. Build each declared destination with Xcode.
 4. Run the Demo on physical iPhone and iPad hardware.
-5. Exercise all renderer layers, filters, density intents, camera projections,
-   appearance modes, and performance policies.
+5. Exercise all renderer layers, filters, density intents, selection and hover,
+   camera projections, appearance modes, and performance policies.
 6. Inspect memory, frame pacing, thermal behavior, and static GPU activity.
 7. Build DocC and verify every symbol link.
 8. Tag only the exact commit that passed the matrix.

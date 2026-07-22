@@ -3,6 +3,8 @@ import SwiftUI
 /// A native SwiftUI globe backed by Sekai's unified offline atlas.
 public struct Sekai: View {
     @Binding private var camera: SekaiCamera
+    private let selection: Binding<SekaiSelection?>?
+    private let hoverSelection: Binding<SekaiSelection?>?
     private let style: SekaiStyle
     private let interaction: SekaiInteractionOptions
     private let performance: SekaiPerformancePolicy
@@ -13,6 +15,9 @@ public struct Sekai: View {
     @State private var dragStart: SekaiQuaternion?
     @State private var zoomStart: Double?
     @State private var interactionPausedAutoRotation = false
+    @State private var selectedCoordinate: SekaiCoordinate?
+    @State private var inertiaTask: Task<Void, Never>?
+    @State private var rotationClock = SekaiRotationClock()
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -24,12 +29,79 @@ public struct Sekai: View {
         metrics: Binding<SekaiRenderMetrics>? = nil,
         @SekaiContentBuilder content: () -> [SekaiLayer] = { [SekaiLayer.landParticles()] }
     ) {
+        self.init(
+            camera: camera,
+            selection: nil,
+            hoverSelection: nil,
+            style: style,
+            interaction: interaction,
+            performance: performance,
+            metrics: metrics,
+            layers: content()
+        )
+    }
+
+    public init(
+        camera: Binding<SekaiCamera>,
+        selection: Binding<SekaiSelection?>,
+        hoverSelection: Binding<SekaiSelection?>? = nil,
+        style: SekaiStyle = .standard,
+        interaction: SekaiInteractionOptions = .standard,
+        performance: SekaiPerformancePolicy = .adaptive(),
+        metrics: Binding<SekaiRenderMetrics>? = nil,
+        @SekaiContentBuilder content: () -> [SekaiLayer] = { [SekaiLayer.landParticles()] }
+    ) {
+        self.init(
+            camera: camera,
+            selection: selection,
+            hoverSelection: hoverSelection,
+            style: style,
+            interaction: interaction,
+            performance: performance,
+            metrics: metrics,
+            layers: content()
+        )
+    }
+
+    public init(
+        camera: Binding<SekaiCamera>,
+        hoverSelection: Binding<SekaiSelection?>,
+        style: SekaiStyle = .standard,
+        interaction: SekaiInteractionOptions = .standard,
+        performance: SekaiPerformancePolicy = .adaptive(),
+        metrics: Binding<SekaiRenderMetrics>? = nil,
+        @SekaiContentBuilder content: () -> [SekaiLayer] = { [SekaiLayer.landParticles()] }
+    ) {
+        self.init(
+            camera: camera,
+            selection: nil,
+            hoverSelection: hoverSelection,
+            style: style,
+            interaction: interaction,
+            performance: performance,
+            metrics: metrics,
+            layers: content()
+        )
+    }
+
+    private init(
+        camera: Binding<SekaiCamera>,
+        selection: Binding<SekaiSelection?>?,
+        hoverSelection: Binding<SekaiSelection?>?,
+        style: SekaiStyle,
+        interaction: SekaiInteractionOptions,
+        performance: SekaiPerformancePolicy,
+        metrics: Binding<SekaiRenderMetrics>?,
+        layers: [SekaiLayer]
+    ) {
         _camera = camera
+        self.selection = selection
+        self.hoverSelection = hoverSelection
         self.style = style
         self.interaction = interaction
         self.performance = performance
         onMetrics = { value in metrics?.wrappedValue = value }
-        layers = content()
+        self.layers = layers
     }
 
     public var body: some View {
@@ -45,21 +117,42 @@ public struct Sekai: View {
                         Circle().stroke(globeRim, lineWidth: max(0, style.globe.rimWidth))
                     }
                     .brightness((style.globe.lighting - 1) * 0.16 - style.globe.darkness * 0.45)
-                    .shadow(color: style.globe.glowColor.swiftUIColor.opacity(style.globe.glowIntensity * 0.45),
-                            radius: diameter * style.globe.glowIntensity * 0.08)
-                    .shadow(color: style.environment.atmosphereColor.swiftUIColor.opacity(style.environment.atmosphereIntensity),
-                            radius: diameter * style.environment.atmosphereThickness)
+                    .shadow(
+                        color: style.globe.glowColor.swiftUIColor.opacity(style.globe.glowIntensity * 0.45),
+                        radius: diameter * style.globe.glowIntensity * 0.08
+                    )
+                    .shadow(
+                        color: style.environment.atmosphereColor.swiftUIColor.opacity(style.environment.atmosphereIntensity),
+                        radius: diameter * style.environment.atmosphereThickness
+                    )
                 SekaiMetalView(
                     scene: scene,
                     camera: camera,
                     style: style,
                     layers: layers,
                     colorScheme: colorScheme,
-                    autoRotationSpeed: reduceMotion || interactionPausedAutoRotation ? 0 : interaction.autoRotationSpeed,
+                    autoRotationSpeed: effectiveAutoRotationSpeed,
+                    rotationClock: rotationClock,
                     performance: performance,
                     onMetrics: onMetrics
                 )
                 .clipShape(Circle())
+                SekaiLabelOverlay(
+                    scene: scene,
+                    camera: camera,
+                    defaultStyle: style,
+                    layers: layers,
+                    colorScheme: colorScheme,
+                    autoRotationSpeed: effectiveAutoRotationSpeed,
+                    rotationClock: rotationClock
+                )
+                .clipShape(Circle())
+                SekaiSelectionIndicator(
+                    coordinate: selectedCoordinate,
+                    camera: camera,
+                    autoRotationSpeed: effectiveAutoRotationSpeed,
+                    rotationClock: rotationClock
+                )
             }
             .frame(width: diameter, height: diameter)
             .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
@@ -67,9 +160,23 @@ public struct Sekai: View {
             .gesture(rotationGesture)
             .simultaneousGesture(zoomGesture)
             .simultaneousGesture(doubleTapGesture)
+            .simultaneousGesture(selectionGesture(size: CGSize(width: diameter, height: diameter)))
+            #if !os(watchOS) && !os(tvOS)
+            .onContinuousHover { phase in
+                switch phase {
+                case let .active(location):
+                    hoverSelection?.wrappedValue = pick(
+                        at: location,
+                        size: CGSize(width: diameter, height: diameter)
+                    )?.selection
+                case .ended:
+                    hoverSelection?.wrappedValue = nil
+                }
+            }
+            #endif
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Sekai globe")
-            .accessibilityValue("Zoom \(Int(camera.zoom * 100)) percent")
+            .accessibilityValue(accessibilityValue)
             #if os(tvOS)
             .focusable()
             .onMoveCommand(perform: moveCamera)
@@ -79,13 +186,17 @@ public struct Sekai: View {
         .aspectRatio(1, contentMode: .fit)
         .task(id: sceneKey) {
             let key = sceneKey
-            let limit = automaticParticleLimit
-            let prepared = await Task.detached(priority: .userInitiated) {
-                SekaiPreparedScene.prepare(layers: key, defaultStyle: style, automaticLimit: limit)
-            }.value
+            let prepared = await SekaiSceneCache.shared.scene(for: key, style: style)
             guard !Task.isCancelled else { return }
             scene = prepared
         }
+        .onAppear { synchronizeSelectionCoordinate() }
+        .onDisappear { inertiaTask?.cancel() }
+        .onChange(of: selection?.wrappedValue) { _, value in
+            if value == nil { selectedCoordinate = nil }
+            else if let value { selectedCoordinate = coordinate(for: value) }
+        }
+        .onChange(of: layers) { _, _ in synchronizeSelectionCoordinate() }
     }
 
     @ViewBuilder private var globeSurface: some View {
@@ -114,20 +225,49 @@ public struct Sekai: View {
         style.globe.glowColor.swiftUIColor.opacity(style.globe.rimOpacity)
     }
 
+    private var effectiveAutoRotationSpeed: Double {
+        reduceMotion || interactionPausedAutoRotation ? 0 : interaction.autoRotationSpeed
+    }
+
+    private var accessibilityValue: String {
+        let selected: String
+        switch selection?.wrappedValue {
+        case let .atlas(id): selected = ", selected \(SekaiAtlas.bundled.feature(id: id)?.name ?? id.rawValue)"
+        case let .annotation(id): selected = ", selected marker \(id)"
+        case let .route(id): selected = ", selected route \(id)"
+        case let .custom(_, featureID): selected = ", selected \(featureID)"
+        case nil: selected = ""
+        }
+        return "Zoom \(Int(camera.zoom * 100)) percent\(selected)"
+    }
+
     private var sceneKey: SekaiSceneKey {
-        SekaiSceneKey(sourceLayers: layers, particleLayers: layers.compactMap { layer in
-            if case let .particles(_, filter, overrideStyle) = layer {
-                return .init(filter: filter, density: overrideStyle?.density ?? style.particles.density)
-            }
-            return nil
-        }, defaultAnnotationElevation: style.annotations.elevation, defaultRouteElevation: style.routes.elevation)
+        SekaiSceneKey(
+            sourceLayers: layers,
+            particleLayers: layers.compactMap { layer in
+                if case let .particles(id, filter, overrideStyle) = layer {
+                    return .init(
+                        id: id,
+                        filter: filter,
+                        density: overrideStyle?.density ?? style.particles.density
+                    )
+                }
+                return nil
+            },
+            defaultAnnotationElevation: style.annotations.elevation,
+            defaultRouteElevation: style.routes.elevation,
+            defaultRouteProgress: style.routes.progress,
+            defaultRoutePattern: style.routes.pattern,
+            defaultRouteEndpointSize: style.routes.endpointSize,
+            automaticParticleLimit: automaticParticleLimit
+        )
     }
 
     private var automaticParticleLimit: Int {
         switch performance {
         case .exact: SekaiAtlas.maximumParticleCount
-        case .batterySaver: 16_384
-        case .adaptive: 65_536
+        case .batterySaver: 32_768
+        case .adaptive: 262_144
         }
     }
 
@@ -135,20 +275,66 @@ public struct Sekai: View {
         #if os(tvOS)
         TapGesture().onEnded {}
         #else
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 2)
             .onChanged { value in
                 guard interaction.allowsRotation else { return }
                 let start = dragStart ?? camera.orientation
                 if dragStart == nil {
+                    stopInertia()
                     dragStart = start
                     if interaction.stopsAutoRotationOnInteraction { interactionPausedAutoRotation = true }
                 }
-                let yaw = SekaiQuaternion.axisAngle(x: 0, y: 1, z: 0, radians: value.translation.width * .pi / 360)
-                let pitch = SekaiQuaternion.axisAngle(x: 1, y: 0, z: 0, radians: value.translation.height * .pi / 360)
-                camera.orientation = pitch * yaw * start
+                camera.orientation = dragRotation(value.translation) * start
             }
-            .onEnded { _ in dragStart = nil }
+            .onEnded { value in
+                dragStart = nil
+                startInertia(
+                    horizontal: value.predictedEndTranslation.width - value.translation.width,
+                    vertical: value.predictedEndTranslation.height - value.translation.height
+                )
+            }
         #endif
+    }
+
+    private func dragRotation(_ translation: CGSize) -> SekaiQuaternion {
+        let yaw = SekaiQuaternion.axisAngle(
+            x: 0, y: 1, z: 0,
+            radians: Double(translation.width) * .pi / 360
+        )
+        let pitch = SekaiQuaternion.axisAngle(
+            x: 1, y: 0, z: 0,
+            radians: Double(translation.height) * .pi / 360
+        )
+        return pitch * yaw
+    }
+
+    private func startInertia(horizontal: CGFloat, vertical: CGFloat) {
+        let retention = min(max(interaction.inertia, 0), 0.98)
+        guard retention > 0, !reduceMotion else { return }
+        var horizontalVelocity = Double(horizontal) * .pi / 3_600
+        var verticalVelocity = Double(vertical) * .pi / 3_600
+        let magnitude = hypot(horizontalVelocity, verticalVelocity)
+        guard magnitude > 0.000_2 else { return }
+        if magnitude > 0.08 {
+            let scale = 0.08 / magnitude
+            horizontalVelocity *= scale
+            verticalVelocity *= scale
+        }
+        inertiaTask = Task { @MainActor in
+            while !Task.isCancelled, hypot(horizontalVelocity, verticalVelocity) > 0.000_12 {
+                let yaw = SekaiQuaternion.axisAngle(x: 0, y: 1, z: 0, radians: horizontalVelocity)
+                let pitch = SekaiQuaternion.axisAngle(x: 1, y: 0, z: 0, radians: verticalVelocity)
+                camera.orientation = pitch * yaw * camera.orientation
+                horizontalVelocity *= retention
+                verticalVelocity *= retention
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+        }
+    }
+
+    private func stopInertia() {
+        inertiaTask?.cancel()
+        inertiaTask = nil
     }
 
     private var zoomGesture: some Gesture {
@@ -160,6 +346,7 @@ public struct Sekai: View {
                 guard interaction.allowsZoom else { return }
                 let start = zoomStart ?? camera.zoom
                 if zoomStart == nil {
+                    stopInertia()
                     zoomStart = start
                     if interaction.stopsAutoRotationOnInteraction { interactionPausedAutoRotation = true }
                 }
@@ -189,10 +376,112 @@ public struct Sekai: View {
     private var doubleTapGesture: some Gesture {
         TapGesture(count: 2).onEnded {
             guard interaction.allowsZoom else { return }
+            stopInertia()
             camera.zoom *= interaction.doubleTapZoom
             camera.clamp(to: interaction.cameraBounds)
             if interaction.stopsAutoRotationOnInteraction { interactionPausedAutoRotation = true }
         }
+    }
+
+    private func selectionGesture(size: CGSize) -> some Gesture {
+        #if os(watchOS) || os(tvOS)
+        return TapGesture().onEnded {}
+        #else
+        return SpatialTapGesture(count: 1).onEnded { value in
+            guard interaction.allowsSelection else { return }
+            let result = pick(at: value.location, size: size)
+            selection?.wrappedValue = result?.selection
+            selectedCoordinate = result?.coordinate
+        }
+        #endif
+    }
+
+    private func pick(at point: CGPoint, size: CGSize) -> SekaiPickResult? {
+        guard interaction.allowsSelection, let scene else { return nil }
+        let spin = rotationClock.angle(speed: effectiveAutoRotationSpeed)
+        return scene.pick(
+            at: point,
+            context: SekaiProjectionContext(size: size, camera: camera, spinAngle: spin)
+        )
+    }
+
+    private func coordinate(for selection: SekaiSelection) -> SekaiCoordinate? {
+        switch selection {
+        case let .atlas(id):
+            return SekaiAtlas.bundled.feature(id: id)?.labelCoordinate
+        case let .annotation(id):
+            for layer in layers {
+                switch layer {
+                case let .annotations(_, values):
+                    if let annotation = values.first(where: { $0.id == id }) { return annotation.coordinate }
+                case let .userLocation(_, annotation) where annotation.id == id:
+                    return annotation.coordinate
+                default: break
+                }
+            }
+        case let .route(id):
+            for layer in layers {
+                if case let .routes(_, values) = layer,
+                   let route = values.first(where: { $0.id == id }) {
+                    return SekaiVector3.slerp(
+                        SekaiVector3(route.from),
+                        SekaiVector3(route.to),
+                        progress: 0.5
+                    ).coordinate
+                }
+            }
+        case let .custom(layerID, featureID):
+            for layer in layers where layer.id == layerID {
+                switch layer {
+                case let .polylines(_, values): return values.first { $0.id == featureID }?.coordinates.first
+                case let .polygons(_, values): return values.first { $0.id == featureID }?.rings.first?.first
+                case let .circles(_, values): return values.first { $0.id == featureID }?.center
+                case let .heatmap(_, values): return values.first { $0.id == featureID }?.coordinate
+                default: break
+                }
+            }
+        }
+        return nil
+    }
+
+    private func synchronizeSelectionCoordinate() {
+        selectedCoordinate = selection?.wrappedValue.flatMap(coordinate(for:))
+    }
+}
+
+private struct SekaiSelectionIndicator: View {
+    let coordinate: SekaiCoordinate?
+    let camera: SekaiCamera
+    let autoRotationSpeed: Double
+    let rotationClock: SekaiRotationClock
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: autoRotationSpeed == 0)) { timeline in
+            GeometryReader { geometry in
+                if let coordinate,
+                   let projected = SekaiProjectionContext(
+                       size: geometry.size,
+                       camera: camera,
+                       spinAngle: rotationClock.angle(
+                           at: timeline.date.timeIntervalSinceReferenceDate,
+                           speed: autoRotationSpeed
+                       )
+                   ).project(coordinate, elevation: 0.035) {
+                    Circle()
+                        .fill(.clear)
+                        #if os(visionOS)
+                        .glassBackgroundEffect(in: Circle())
+                        #else
+                        .glassEffect(.clear.tint(.accentColor), in: .circle)
+                        #endif
+                        .overlay(Circle().stroke(.white.opacity(0.85), lineWidth: 1))
+                        .frame(width: 18, height: 18)
+                        .position(projected.point)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -206,8 +495,10 @@ private struct SekaiStarField: View {
                 let x = pseudoRandom(index * 2) * size.width
                 let y = pseudoRandom(index * 2 + 1) * size.height
                 let diameter = 0.6 + pseudoRandom(index * 3 + 7) * 1.2
-                context.fill(Path(ellipseIn: CGRect(x: x, y: y, width: diameter, height: diameter)),
-                             with: .color(.white.opacity(0.35 + pseudoRandom(index + 11) * 0.5)))
+                context.fill(
+                    Path(ellipseIn: CGRect(x: x, y: y, width: diameter, height: diameter)),
+                    with: .color(.white.opacity(0.35 + pseudoRandom(index + 11) * 0.5))
+                )
             }
         }
         .allowsHitTesting(false)
@@ -223,124 +514,5 @@ extension SekaiColor {
     var swiftUIColor: Color {
         let value = normalized()
         return Color(red: value.red, green: value.green, blue: value.blue, opacity: value.alpha)
-    }
-}
-
-struct SekaiSceneKey: Equatable {
-    struct Layer: Equatable, Sendable {
-        let filter: SekaiRegionFilter
-        let density: SekaiParticleDensity
-    }
-    let sourceLayers: [SekaiLayer]
-    let particleLayers: [Layer]
-    let defaultAnnotationElevation: Double
-    let defaultRouteElevation: Double
-
-    static func == (left: Self, right: Self) -> Bool {
-        guard left.particleLayers == right.particleLayers,
-              left.defaultAnnotationElevation == right.defaultAnnotationElevation,
-              left.defaultRouteElevation == right.defaultRouteElevation,
-              left.sourceLayers.count == right.sourceLayers.count else { return false }
-        return zip(left.sourceLayers, right.sourceLayers).allSatisfy(layerGeometryEquals)
-    }
-
-    private static func layerGeometryEquals(_ pair: (SekaiLayer, SekaiLayer)) -> Bool {
-        switch pair {
-        case let (.particles(_, left, _), .particles(_, right, _)),
-             let (.boundaries(_, left, _), .boundaries(_, right, _)),
-             let (.labels(_, left, _), .labels(_, right, _)):
-            left == right
-        case let (.annotations(_, left), .annotations(_, right)):
-            left.map { ($0.coordinate, $0.style?.elevation) }.elementsEqual(
-                right.map { ($0.coordinate, $0.style?.elevation) }, by: ==
-            )
-        case let (.routes(_, left), .routes(_, right)):
-            left.map { ($0.from, $0.to, $0.curve, $0.style?.elevation) }.elementsEqual(
-                right.map { ($0.from, $0.to, $0.curve, $0.style?.elevation) }, by: ==
-            )
-        case let (.polylines(_, left), .polylines(_, right)):
-            left.map { ($0.coordinates, $0.style.elevation) }.elementsEqual(
-                right.map { ($0.coordinates, $0.style.elevation) }, by: ==
-            )
-        case let (.userLocation(_, left), .userLocation(_, right)):
-            left.coordinate == right.coordinate && left.style?.elevation == right.style?.elevation
-        case let (.physical(_, left), .physical(_, right)): left == right
-        case let (.polygons(_, left), .polygons(_, right)): left == right
-        case let (.circles(_, left), .circles(_, right)): left == right
-        case let (.heatmap(_, left), .heatmap(_, right)): left == right
-        case let (.texture(_, leftName, _), .texture(_, rightName, _)): leftName == rightName
-        default: false
-        }
-    }
-}
-
-final class SekaiPreparedScene: @unchecked Sendable {
-    let particles: [PackedParticle]
-    let boundaryFills: [PackedParticle]
-    let boundaries: [PackedParticle]
-    let annotations: [PackedParticle]
-    let routes: [PackedParticle]
-
-    init(particles: [PackedParticle], boundaryFills: [PackedParticle], boundaries: [PackedParticle], annotations: [PackedParticle], routes: [PackedParticle]) {
-        self.particles = particles
-        self.boundaryFills = boundaryFills
-        self.boundaries = boundaries
-        self.annotations = annotations
-        self.routes = routes
-    }
-
-    static func prepare(layers: SekaiSceneKey, defaultStyle: SekaiStyle, automaticLimit: Int) -> SekaiPreparedScene {
-        let atlas = SekaiAtlas.bundled
-        let particles = layers.particleLayers.flatMap {
-            atlas.packedParticles(matching: $0.filter, density: $0.density, automaticLimit: automaticLimit)
-        }
-        var boundaries: [PackedParticle] = []
-        var boundaryFills: [PackedParticle] = []
-        var annotations: [PackedParticle] = []
-        var routes: [PackedParticle] = []
-        for layer in layers.sourceLayers {
-            switch layer {
-            case let .boundaries(_, filter, _):
-                boundaryFills += atlas.packedBoundaryFillVertices(matching: filter, levelOfDetail: 1)
-                boundaries += atlas.packedBoundaryVertices(matching: filter, levelOfDetail: 1)
-            case let .annotations(_, values):
-                annotations += values.map { PackedParticle($0.coordinate, elevation: $0.style?.elevation ?? defaultStyle.annotations.elevation) }
-            case let .userLocation(_, annotation):
-                annotations.append(PackedParticle(annotation.coordinate, elevation: annotation.style?.elevation ?? defaultStyle.annotations.elevation))
-            case let .routes(_, values):
-                routes += values.flatMap { routeVertices($0, defaultStyle: defaultStyle.routes) }
-            case let .polylines(_, values):
-                routes += values.flatMap { linePairs($0.coordinates, elevation: $0.style.elevation) }
-            default: break
-            }
-        }
-        return SekaiPreparedScene(particles: particles, boundaryFills: boundaryFills, boundaries: boundaries, annotations: annotations, routes: routes)
-    }
-
-    private static func routeVertices(_ route: SekaiRoute, defaultStyle: SekaiRouteStyle) -> [PackedParticle] {
-        let style = route.style ?? defaultStyle
-        let coordinates: [SekaiCoordinate]
-        switch route.curve {
-        case let .custom(values): coordinates = values
-        case .rhumb: coordinates = stride(from: 0.0, through: 1.0, by: 1.0 / 64).map {
-            SekaiCoordinate(latitude: route.from.latitude + (route.to.latitude - route.from.latitude) * $0,
-                            longitude: route.from.longitude + (route.to.longitude - route.from.longitude) * $0)
-        }
-        case .greatCircle:
-            let start = SekaiVector3(route.from)
-            let end = SekaiVector3(route.to)
-            coordinates = stride(from: 0.0, through: 1.0, by: 1.0 / 64).map { progress in
-                let point = SekaiVector3.slerp(start, end, progress: progress)
-                return SekaiCoordinate(latitude: asin(point.y) * 180 / .pi, longitude: atan2(point.x, point.z) * 180 / .pi)
-            }
-        }
-        return linePairs(coordinates, elevation: style.elevation)
-    }
-
-    private static func linePairs(_ coordinates: [SekaiCoordinate], elevation: Double) -> [PackedParticle] {
-        guard coordinates.count > 1 else { return [] }
-        return zip(coordinates, coordinates.dropFirst()).flatMap {
-            [PackedParticle($0.0, elevation: elevation), PackedParticle($0.1, elevation: elevation)]
-        }
     }
 }
