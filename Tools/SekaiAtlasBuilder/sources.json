@@ -1,0 +1,10 @@
+{
+  "naturalEarthVersion": "5.1.1",
+  "particleCount": 1048576,
+  "sources": {
+    "mapUnits": {
+      "url": "https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_admin_0_map_units.zip",
+      "sha256": "45bebe2aaf8bf42b9daf4428594925bcb11eabd32fe9dc6e0acf681438053eb5"
+    }
+  }
+}
