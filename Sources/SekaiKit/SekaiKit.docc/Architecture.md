@@ -1,25 +1,24 @@
 # Architecture
 
-Sekai has four boundaries:
+Sekai 2 has one production product and one rendering path.
 
-1. Value API: camera, style, features, filters, and layers are Codable Sendable
-   values.
-2. Atlas: one immutable memory-mapped file owns built-in coordinates and
-   hierarchy.
-3. Scene preparation: an actor filters deterministic atlas records, reuses
-   lock-protected geometry caches, tessellates host geometry, and produces
-   identity-preserving draw and pick batches.
-4. Presentation: SwiftUI owns native glass, labels, and gestures; Metal owns
-   dense geometry and applies one quaternion transform to every GPU layer.
+The SwiftUI `Sekai` view receives immutable style, activity, interaction, marker,
+and arc values. A binding supplies the requested camera. The package does not
+own application navigation or persist host preferences.
 
-Visual uniforms do not rebuild the master atlas geometry. Adaptive policy
-changes submitted prefixes and prebuilt boundary LODs without changing source
-identity. CPU projection, GPU projection, labels, and hit testing share the same
-camera and rotation math.
+One native Metal view coordinator owns the device, command queue, pipelines,
+mask texture, overlay buffers, and render clock. The globe uses analytical
+inverse Fibonacci sampling in a fullscreen fragment pass. Markers and arcs
+use GPU batches with the same camera transform.
 
-There is no raster fallback and no second region sample source. Data adapters
-produce `SekaiLayer` values and do not reach into rendering internals.
+Camera, color, and density changes update uniforms. Overlay buffers change
+when their values change. There is no point-atlas preparation actor, scene
+cache, country lookup index, or per-frame SwiftUI timeline.
 
-The products are deliberately separate. `SekaiKit` never links Core Location
-or the inspector. `SekaiGeoJSON` and `SekaiLocation` depend only on the core.
-`SekaiInspector` is development UI and is not required in production apps.
+The renderer controls cadence from activity, scene state, motion accessibility,
+and attachment. Dismantling stops drawing and releases its owned callbacks and
+resources. Typed failures are visible to the host through `onStatusChange`.
+
+The shader and local mask are adapted from COBE under its MIT license. REA
+was used for source analysis during development. Neither tool introduces a
+runtime JavaScript or network dependency.

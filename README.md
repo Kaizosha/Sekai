@@ -1,48 +1,7 @@
 # Sekai
 
-Sekai is an offline-first, native globe package for SwiftUI. One bundled
-Natural Earth atlas drives particles, boundaries, hierarchy, search, labels,
-and filtering. Metal renders dense geographic content while SwiftUI provides
-the native Liquid Glass sphere and interface.
-
-Developed by [Kaizōsha](https://kaizosha.org) and created by
-[Kaizō Konpaku](https://x.com/kaizookonpaku).
-
-- Homepage: [kaizosha.org/sekai](https://kaizosha.org/sekai/)
-- Organization: [@KaizoshaX](https://x.com/KaizoshaX)
-- Author: [@kaizookonpaku](https://x.com/kaizookonpaku)
-
-## Preview
-
-<p align="center">
-  <img src="Documentation/Media/SekaiDemo-iOS.gif" alt="Sekai on iPhone" width="320">
-</p>
-
-## Requirements
-
-- Swift 6.2
-- Xcode 26 or newer
-- iOS/iPadOS 26, macOS 26, tvOS 26, watchOS 26, or visionOS 26
-
-Sekai needs no network connection, account, API key, MapKit setup, JavaScript,
-WebView, or location permission. `SekaiLocation` requests permission only when
-the host explicitly uses it.
-
-## Installation
-
-Add `https://github.com/Kaizosha/Sekai.git` in Xcode, then link only the
-products the app uses:
-
-- `SekaiKit`: required globe, atlas, camera, styles, layers, and renderer
-- `SekaiGeoJSON`: optional GeoJSON conversion
-- `SekaiLocation`: optional Core Location bridge
-- `SekaiInspector`: optional development inspector and demo
-
-```swift
-.package(url: "https://github.com/Kaizosha/Sekai.git", from: "1.1.0")
-```
-
-## Minimal Use
+A native SwiftUI globe rendered with Metal. Sekai 2 focuses on a shaded globe,
+land dots, markers, and raised great-circle arcs.
 
 ```swift
 import SekaiKit
@@ -50,207 +9,122 @@ import SwiftUI
 
 struct GlobeView: View {
     @State private var camera = SekaiCamera.standard
-    @State private var selection: SekaiSelection?
 
     var body: some View {
-        Sekai(camera: $camera, selection: $selection) {
-            SekaiLayer.landParticles()
-        }
-        .aspectRatio(1, contentMode: .fit)
+        Sekai(camera: $camera)
+            .aspectRatio(1, contentMode: .fit)
     }
 }
 ```
 
-The production default is a clear white native-glass sphere, adaptive black or
-white particles, orthographic projection, automatic density, no labels, no
-sample markers, and no sample routes.
+Developed by [Kaizōsha](https://kaizosha.org). Created by
+[Kaizō Konpaku](https://x.com/kaizookonpaku).
 
-## Compose A Map
+## Requirements
 
-Layers are ordered back to front and use one coordinate system.
+- Swift 6.2 and Xcode 26 or newer.
+- iOS and iPadOS 26, macOS 26, tvOS 26, or visionOS 26.
+- A Metal-capable device.
+
+The globe runs offline with a bundled land mask. It requires no account,
+API key, network request, MapKit setup, WebView, or location permission.
+
+## Install
+
+Add `https://github.com/Kaizosha/Sekai.git` as a Swift package dependency and
+link the `SekaiKit` product.
 
 ```swift
-let chicago = SekaiCoordinate(latitude: 41.8781, longitude: -87.6298)
-let tokyo = SekaiCoordinate(latitude: 35.6762, longitude: 139.6503)
-
-Sekai(camera: $camera, style: style, interaction: interaction) {
-    SekaiLayer.landParticles(filter: .allLand)
-    SekaiLayer.regionBoundaries(filter: .country("JPN"))
-    SekaiLayer.routes(id: "flights", values: [
-        SekaiRoute(id: "ord-hnd", from: chicago, to: tokyo)
-    ])
-    SekaiLayer.annotations(id: "cities", values: [
-        SekaiAnnotation(id: "chicago", coordinate: chicago, title: "Chicago"),
-        SekaiAnnotation(id: "tokyo", coordinate: tokyo, title: "Tokyo")
-    ])
-}
+.package(url: "https://github.com/Kaizosha/Sekai.git", from: "2.0.0")
 ```
 
-Particles, boundaries, annotations, routes, polylines, polygons, geodesic
-circles, heat points, collision-managed labels, physical boundary lines, and
-user location render directly. Texture values remain reserved scene schema for
-a future raster product.
+Sekai 2 is a breaking API revision. Existing atlas and GIS clients can stay on
+1.1.0. Read [the migration guide](MIGRATION.md) before upgrading.
 
-## Geography
-
-`SekaiAtlas.bundled` is the only built-in geography source. It contains:
-
-- Natural Earth 1:10m Admin 0 Map Units
-- 1,048,576 deterministic equal-area land particles
-- map-unit, country, sovereign, continent, region, and subregion hierarchy
-- three vector levels of detail
-- localized names, labels, bounds, and political worldview classifications
+## Add motion and overlays
 
 ```swift
-let atlas = SekaiAtlas.bundled
-let india = atlas.search("India")
-let available = atlas.availableParticleCount(for: .country("IND"))
-```
-
-Country filters intentionally include territories represented by Natural
-Earth under that Admin 0 country. Use `.mapUnit("FRA")` when an application
-needs one map unit rather than the aggregate `.country("FRA")`.
-
-Density is explicit:
-
-- `.automatic`: policy-selected interactive count
-- `.count(n)`: exactly `n`, or all available when a region has fewer
-- `.fraction(x)`: a deterministic fraction of the selected source
-- `.maximum`: every available source point, with no hidden cap
-
-All modes select deterministic prefixes from the same master hierarchy, so
-changing density never changes the underlying map. Adaptive policy can submit a
-smaller prefix to maintain its frame target; use `.exact` when every requested
-point must reach the GPU.
-
-## Camera And Interaction
-
-`SekaiCamera` uses a normalized quaternion, avoiding gimbal lock and inverted
-vertical drag. Its state includes projection, zoom, and screen offset.
-
-```swift
-var interaction = SekaiInteractionOptions(
-    allowsRotation: true,
-    allowsZoom: true,
-    allowsSelection: true,
-    inertia: 0.88,
-    autoRotationSpeed: 0.08,
-    stopsAutoRotationOnInteraction: false
+Sekai(
+    camera: $camera,
+    style: .automatic,
+    activity: .active(rotationSpeed: 0.08),
+    interaction: .rotationAndZoom,
+    markers: [
+        .init(id: "chicago", coordinate: .init(latitude: 41.8781, longitude: -87.6298)),
+        .init(id: "tokyo", coordinate: .init(latitude: 35.6762, longitude: 139.6503))
+    ],
+    arcs: [
+        .init(
+            id: "chicago-tokyo",
+            from: .init(latitude: 41.8781, longitude: -87.6298),
+            to: .init(latitude: 35.6762, longitude: 139.6503)
+        )
+    ]
 )
 ```
 
-Touching the globe does not disable rotation unless
-`stopsAutoRotationOnInteraction` is explicitly enabled. Automatic rotation,
-particles, boundaries, routes, and markers share one GPU transform.
+Rotation speed is in radians per second. Markers and arcs use stable IDs and
+share the globe's camera transform. Arcs follow raised great-circle paths.
+They are not a GIS routing or navigation service.
 
-Tap and pointer hit testing write stable atlas, annotation, route, or custom IDs
-through the optional `selection` and `hoverSelection` bindings. Projection
-modes are `.orthographic` and `.perspective(fieldOfViewDegrees:)`. Camera zoom
-is constrained by `SekaiCameraBounds`.
+The camera binding owns the requested orientation, zoom, and offset. Use
+`camera.focus(on:)` to center a coordinate. Projection is orthographic.
 
-`SekaiCamera.fit(_:padding:limits:)` frames features and antimeridian-crossing
-bounds. `SekaiCameraController` provides cancellable quaternion-slerped camera
-flights without pole flips.
+## Control activity
 
-## Styling
-
-`SekaiStyle` is Codable, Equatable, and Sendable. It groups:
-
-- `globe`: material, tint, opacity, lighting, darkness, rim, and glow
-- `particles`: adaptive color, density, size, opacity, optical response, fade
-- `boundaries`: fill/stroke colors, opacity, width, highlight, refraction
-- `annotations`: color, size, elevation, halo, core, highlight
-- `routes`: color, width, elevation, opacity, pattern, progress, endpoints
-- `labels`: color, zoom threshold, count, collision padding
-- `environment`: background, stars, atmosphere, sun, ambient light, terminator
+Use `.suspended` when the globe is covered by another surface or is not needed.
+The host owns that presentation decision.
 
 ```swift
-var style = SekaiStyle.standard
-style.particles.density = .maximum
-style.particles.size = 0.55
-style.environment.showsStars = true
-style.environment.atmosphereIntensity = 0.4
+Sekai(
+    camera: $camera,
+    activity: isGlobeVisible ? .active(rotationSpeed: 0.08) : .suspended,
+    interaction: .disabled
+)
 ```
 
-SwiftUI cannot efficiently instantiate native Liquid Glass for hundreds of
-thousands of individual views. Sekai therefore uses native Liquid Glass for the
-sphere and controls, and a matching optical Metal material for dense particles,
-routes, boundaries, and markers. This is the production path that preserves
-appearance without view-count stalls.
+Sekai also respects scene activity, Reduce Motion, and native view attachment.
+An idle globe draws on demand. Suspension preserves its angle and stops
+continuous rendering. A changed input can request a single redraw.
 
-## Performance Policy
+`SekaiStyle.automatic` follows system appearance. Explicit `.light` and `.dark`
+styles are available for fixed artwork. The globe is shaded in Metal; it does
+not add a second Liquid Glass background over its content.
 
-- `.adaptive(minimumFramesPerSecond:)`: measures rolling frame rate and adjusts
-  submitted particle prefixes plus boundary LOD with hysteresis
-- `.exact`: honors requested source detail; `.maximum` remains maximum
-- `.batterySaver`: uses a smaller automatic count and 30 FPS presentation
+## Handle rendering failure
 
-Explicit `.count`, `.fraction`, and `.maximum` values always preserve their
-logical request. Adaptive policy may submit fewer points temporarily and reports
-both counts through `SekaiRenderMetrics`; `.exact` submits the complete request.
-Static globes pause `MTKView` and perform no continuous frame work.
-watchOS uses a capped Canvas presentation while preserving the same atlas and
-public scene model.
+The optional `onStatusChange` closure reports `SekaiRenderStatus`. The status
+is `.preparing`, `.ready`, or `.failed` with a typed `SekaiRenderError`.
+A failed globe uses a neutral fallback rather than starting an animated CPU
+renderer. Use the callback for host-specific messaging.
 
-## Optional Modules
+## Rendering model
 
-### GeoJSON
+The globe uses inverse Fibonacci sampling in a fragment shader and one small
+land-mask texture. Density changes a shader input rather than rebuilding a
+point atlas. Markers and arcs use separate GPU batches only when present.
 
-```swift
-import SekaiGeoJSON
+This design adapts [COBE's renderer](https://github.com/shuding/cobe), with
+native Swift camera state, lifecycle management, and Metal shaders. REA was
+used for development-time source analysis. Neither REA nor COBE's JavaScript
+runtime is included in the app.
 
-let group = try SekaiGeoJSON.decode(data, layerID: "earthquakes")
-```
+Rendering cost depends on drawable pixels, hardware, and overlay count.
+Measure frame pacing and GPU time on the target device before making a
+performance claim. See the [performance guide](Sources/SekaiKit/SekaiKit.docc/Performance.md).
 
-FeatureCollection, Feature, Point, MultiPoint, LineString, MultiLineString,
-Polygon, and MultiPolygon are decoded with `JSONSerialization` into typed Sekai
-layers. Simple-style marker, stroke, fill, width, and opacity properties become
-native Sekai optical styles.
+## Example and documentation
 
-### Location
+Open `Examples/SekaiDemo/SekaiDemo.xcodeproj` for a native iPhone and iPad demo.
+It links only `SekaiKit` and exposes rotation, appearance, overlays, and camera
+reset. Select your own development team before installing it on a device.
 
-```swift
-import SekaiLocation
-
-@State private var location = SekaiLocationProvider()
-```
-
-The host remains responsible for the appropriate Info.plist usage description.
-
-### Inspector And Demo
-
-```swift
-import SekaiInspector
-
-SekaiDemo()
-```
-
-`SekaiDemo` is the package's only reference UI. `SekaiInspector` can also be
-embedded separately. `SekaiCodeExporter.minimalIntegration` provides a
-copyable implementation snippet.
-
-## Atlas Reproducibility
-
-The checked-in runtime atlas is generated by `Tools/SekaiAtlasBuilder`. Sources
-and SHA-256 checksums are pinned in `sources.json`.
-
-```sh
-python3 -m venv .venv
-.venv/bin/pip install -r Tools/SekaiAtlasBuilder/requirements.txt
-.venv/bin/python Tools/SekaiAtlasBuilder/build_atlas.py \
-  --output Sources/SekaiKit/Resources/SekaiWorld.sekaiatlas
-```
-
-Do not edit the binary atlas manually. Change the manifest or builder, rebuild,
-and commit both generator and artifact.
-
-## Documentation
-
-The DocC catalog covers integration, architecture, atlas format, layers,
-interaction, styling, performance, optional modules, testing, and data
-attribution. See `Sources/SekaiKit/SekaiKit.docc`.
+The DocC catalog contains [getting started](Sources/SekaiKit/SekaiKit.docc/GettingStarted.md),
+[architecture](Sources/SekaiKit/SekaiKit.docc/Architecture.md),
+[camera and interaction](Sources/SekaiKit/SekaiKit.docc/CameraAndInteraction.md),
+and [verification](Sources/SekaiKit/SekaiKit.docc/TestingAndRelease.md).
 
 ## License
 
-Sekai source is available under the repository license. Natural Earth data is
-public domain; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Sekai is MIT licensed. The shader adaptation and land mask retain COBE's MIT
+notice. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).

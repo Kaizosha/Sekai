@@ -1,19 +1,20 @@
 # Styling
 
-`SekaiStyle` groups globe, particle, boundary, annotation, route, label, and
-environment values. Values are not inspector metadata; rendering consumes them.
+`SekaiStyle.automatic` follows the host's color scheme. Use `.light` or `.dark`
+for a fixed appearance.
 
-Adaptive colors resolve from system appearance. Particle brightness,
-highlight, refraction, depth fade, opacity, and size are shader uniforms, so
-editing them does not rebuild geography. Density and region filters do rebuild
-the relevant prepared buffer.
+```swift
+Sekai(camera: $camera, style: .automatic)
+```
 
-Native Liquid Glass is used for the sphere and interface surfaces. Dense map
-elements use a GPU optical material because a native view per point is not
-viable at 1,048,576 points. This hybrid is intentional and should be described
-accurately in product UI.
+The style controls the shaded globe and land-dot appearance. Marker and arc
+values can override their colors. Appearance changes update render inputs,
+without creating a new point atlas.
 
-Environments can set background, stars, atmosphere, sun coordinates, ambient
-light, and a day/night terminator. Visual environment settings require no
-network. System environment behavior follows color scheme, Reduce Motion,
-thermal state, and platform presentation conventions.
+The globe is a Metal drawing. It does not create a native Liquid Glass sphere
+or one SwiftUI view per dot. Hosts can use native glass for surrounding buttons
+and toolbars without layering another material over the globe.
+
+Compose the globe over the host background and inspect transparent edges in
+Light and Dark appearances. Do not assume one palette is legible on every
+custom background.

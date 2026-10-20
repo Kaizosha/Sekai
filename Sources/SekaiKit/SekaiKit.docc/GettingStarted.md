@@ -1,6 +1,6 @@
-# Getting Started
+# Getting started
 
-Install `SekaiKit`, retain camera state in the host, and declare ordered layers.
+Add the `SekaiKit` product to a SwiftUI app, then bind a camera to the globe.
 
 ```swift
 import SekaiKit
@@ -8,43 +8,27 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var camera = SekaiCamera.standard
-    @State private var selection: SekaiSelection?
 
     var body: some View {
-        Sekai(camera: $camera, selection: $selection) {
-            SekaiLayer.landParticles()
-            SekaiLayer.labels(filter: .allLand)
-        }
-        .padding()
+        Sekai(camera: $camera)
+            .padding()
     }
 }
 ```
 
-The camera binding is required because interaction is state, not hidden view
-state. The optional selection binding reports atlas regions, annotations,
-routes, polygons, circles, and other custom features. Keep every annotation and
-overlay identified with a stable ID.
-
-Use ``SekaiCameraController`` when the host needs cancellable animated camera
-transitions:
+Set activity to rotate the globe or suspend it when covered.
 
 ```swift
-@State private var cameraController = SekaiCameraController()
-
-Sekai(camera: $cameraController.camera) {
-    SekaiLayer.landParticles()
-}
-
-Button("Show Japan") {
-    if let japan = SekaiAtlas.bundled.search("Japan").first {
-        cameraController.fit(japan)
-    }
-}
+Sekai(
+    camera: $camera,
+    activity: isVisible ? .active(rotationSpeed: 0.08) : .suspended,
+    interaction: .disabled
+)
 ```
 
-Styles, cameras, layers, and interaction options conform to `Codable` where
-their values are suitable for persistence.
+Add identified values to `markers` and `arcs` when overlays are needed.
+Every overlay shares the globe's camera transform. Keep navigation, sheets,
+application preferences, and language choices in the host app.
 
-Required: `SekaiKit`, a camera binding, and at least one layer. Optional:
-selection and hover bindings, custom style, interaction options, performance
-policy, overlays, labels, network data, GeoJSON, and location.
+The optional `onStatusChange` callback reports preparation, readiness, or a
+typed failure. A rendering failure does not start a CPU animation fallback.

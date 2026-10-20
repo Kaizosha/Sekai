@@ -9,7 +9,6 @@
 /* Begin PBXBuildFile section */
 		27986CF093986343D5A1D983 /* SekaiKit in Frameworks */ = {isa = PBXBuildFile; productRef = D5F91C7295BD68FC0E049E6C /* SekaiKit */; };
 		41BE982FC14287746C57461D /* SekaiDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 406C974C0CD7BAFF9D4DA6ED /* SekaiDemoApp.swift */; };
-		5478AC44490AF591DD9EB911 /* SekaiInspector in Frameworks */ = {isa = PBXBuildFile; productRef = A502E3045091452C408F14D3 /* SekaiInspector */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,7 +23,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				27986CF093986343D5A1D983 /* SekaiKit in Frameworks */,
-				5478AC44490AF591DD9EB911 /* SekaiInspector in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -81,7 +79,6 @@
 			name = SekaiDemo;
 			packageProductDependencies = (
 				D5F91C7295BD68FC0E049E6C /* SekaiKit */,
-				A502E3045091452C408F14D3 /* SekaiInspector */,
 			);
 			productName = SekaiDemo;
 			productReference = 2BF39C54A88EFA25D1119F4B /* SekaiDemo.app */;
@@ -97,7 +94,6 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					D0B4A18672E1BF6E44F43072 = {
-						DevelopmentTeam = GH69QQ984P;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -139,10 +135,8 @@
 		073E4DA3704A27C0E8163A68 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = GH69QQ984P;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Sekai;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -173,10 +167,8 @@
 		38E3699591B463325F55A2F1 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = GH69QQ984P;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Sekai;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -354,10 +346,6 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		A502E3045091452C408F14D3 /* SekaiInspector */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = SekaiInspector;
-		};
 		D5F91C7295BD68FC0E049E6C /* SekaiKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SekaiKit;

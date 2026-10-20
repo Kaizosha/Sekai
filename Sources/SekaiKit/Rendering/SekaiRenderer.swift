@@ -1,525 +1,451 @@
-#if canImport(MetalKit) && !os(watchOS)
 @preconcurrency import MetalKit
-import SwiftUI
+import QuartzCore
 
-#if os(macOS)
-private typealias SekaiRepresentable = NSViewRepresentable
-#else
-private typealias SekaiRepresentable = UIViewRepresentable
-#endif
+struct SekaiRenderInput: Equatable {
+  var camera = SekaiCamera.standard
+  var style = SekaiStyle.automatic
+  var activity = SekaiActivity.active()
+  var interaction = SekaiInteraction.rotationAndZoom
+  var markers: [SekaiMarker] = []
+  var arcs: [SekaiArc] = []
+  var dark = false
+  var allowsMotion = true
+  var isSceneActive = true
+}
 
-struct SekaiMetalView: SekaiRepresentable {
-    let scene: SekaiPreparedScene?
-    let camera: SekaiCamera
-    let style: SekaiStyle
-    let layers: [SekaiLayer]
-    let colorScheme: ColorScheme
-    let autoRotationSpeed: Double
-    let rotationClock: SekaiRotationClock
-    let performance: SekaiPerformancePolicy
-    let onMetrics: @MainActor (SekaiRenderMetrics) -> Void
+struct SekaiUniforms {
+  var orientation: SIMD4<Float>
+  var viewport: SIMD4<Float>
+  var camera: SIMD4<Float>
+  var ocean: SIMD4<Float>
+  var land: SIMD4<Float>
+  var glow: SIMD4<Float>
+  var options: SIMD4<Float>
+  var markerColor: SIMD4<Float>
+  var arcColor: SIMD4<Float>
+}
+private struct SekaiMarkerGPU {
+  var positionSize: SIMD4<Float>
+  var color: SIMD4<Float>
+}
+private struct SekaiArcGPU {
+  var fromHeight: SIMD4<Float>
+  var toWidth: SIMD4<Float>
+  var color: SIMD4<Float>
+}
 
-    func makeCoordinator() -> Renderer { Renderer() }
+@MainActor
+final class SekaiRenderer: NSObject, MTKViewDelegate {
+  let device: MTLDevice?
+  private var queue: MTLCommandQueue?
+  private var globe: MTLRenderPipelineState?
+  private var marker: MTLRenderPipelineState?
+  private var arc: MTLRenderPipelineState?
+  private var mask: MTLTexture?
+  private var markerBuffer: MTLBuffer?
+  private var arcBuffer: MTLBuffer?
+  private var markerCount = 0
+  private var arcCount = 0
+  private let inFlight = DispatchSemaphore(value: 3)
+  private var motion = SekaiMotion()
+  private var dragStart: SekaiQuaternion?
+  private var zoomStart: Double?
+  private var statusDelivery: Task<Void, Never>?
+  private var pendingStatus: SekaiRenderStatus?
+  private var deliveredStatus: SekaiRenderStatus?
+  private var hasDrawableSize = true
+  private weak var nativeView: MTKView?
+  private(set) var input = SekaiRenderInput()
+  private(set) var status = SekaiRenderStatus.preparing
+  private(set) var isAttached = false
+  private(set) var isStopped = false
+  private(set) var submittedFrames = 0
+  #if DEBUG
+    private let completions = SekaiCompletionCount()
+    var completedFrames: Int { completions.value }
+  #endif
+  private(set) var markerUploads = 0
+  private(set) var arcUploads = 0
+  var onCameraChange: (@MainActor (SekaiCamera) -> Void)?
+  private var onStatusChange: (@MainActor (SekaiRenderStatus) -> Void)?
 
+  init(
+    device: MTLDevice? = MTLCreateSystemDefaultDevice(), bundle: Bundle? = nil,
+    pixelFormat: MTLPixelFormat = .bgra8Unorm_srgb
+  ) {
+    self.device = device
+    super.init()
+    guard let device else {
+      status = .failed(.metalUnavailable)
+      return
+    }
+    do {
+      let bundle = bundle ?? .module
+      guard let url = bundle.url(forResource: "LandMask", withExtension: "png") else {
+        throw SekaiRenderError.resourceUnavailable
+      }
+      let library: MTLLibrary
+      do { library = try device.makeDefaultLibrary(bundle: bundle) } catch {
+        throw SekaiRenderError.resourceUnavailable
+      }
+      globe = try Self.pipeline(
+        device: device, library: library, vertex: "sekaiGlobeVertex",
+        fragment: "sekaiGlobeFragment", format: pixelFormat)
+      marker = try Self.pipeline(
+        device: device, library: library, vertex: "sekaiMarkerVertex",
+        fragment: "sekaiMarkerFragment", format: pixelFormat)
+      arc = try Self.pipeline(
+        device: device, library: library, vertex: "sekaiArcVertex", fragment: "sekaiArcFragment",
+        format: pixelFormat)
+      mask = try MTKTextureLoader(device: device).newTexture(URL: url, options: [.SRGB: false])
+      queue = device.makeCommandQueue()
+      guard queue != nil else { throw SekaiRenderError.allocationFailed }
+      status = .ready
+    } catch let error as SekaiRenderError { status = .failed(error) } catch {
+      status = .failed(.resourceUnavailable)
+    }
+  }
+
+  private static func pipeline(
+    device: MTLDevice, library: MTLLibrary, vertex: String, fragment: String, format: MTLPixelFormat
+  ) throws -> MTLRenderPipelineState {
+    let descriptor = MTLRenderPipelineDescriptor()
+    guard let vertex = library.makeFunction(name: vertex),
+      let fragment = library.makeFunction(name: fragment)
+    else {
+      throw SekaiRenderError.pipelineUnavailable
+    }
+    descriptor.vertexFunction = vertex
+    descriptor.fragmentFunction = fragment
+    let color = descriptor.colorAttachments[0]!
+    color.pixelFormat = format
+    color.isBlendingEnabled = true
+    color.sourceRGBBlendFactor = .one
+    color.destinationRGBBlendFactor = .oneMinusSourceAlpha
+    color.sourceAlphaBlendFactor = .one
+    color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+    do { return try device.makeRenderPipelineState(descriptor: descriptor) } catch {
+      throw SekaiRenderError.pipelineUnavailable
+    }
+  }
+
+  func update(
+    _ value: SekaiRenderInput, status: (@MainActor (SekaiRenderStatus) -> Void)?,
+    camera: @escaping @MainActor (SekaiCamera) -> Void
+  ) {
+    guard !isStopped else { return }
+    let old = input
+    let normalizedCamera = value.camera.normalized
+    if old.camera.orientation != normalizedCamera.orientation {
+      _ = motion.consume(at: CACurrentMediaTime())
+    }
+    input = value
+    input.camera = normalizedCamera
+    onCameraChange = camera
+    onStatusChange = status
+    motion.update(at: CACurrentMediaTime(), speed: rotationSpeed)
+    if old.markers != input.markers { uploadMarkers() }
+    if old.arcs != input.arcs { uploadArcs() }
+    if !allowsInteraction {
+      dragStart = nil
+      zoomStart = nil
+    }
+    deliverStatus()
+  }
+
+  private var rotationSpeed: Double {
+    guard isAttached, hasDrawableSize, input.isSceneActive, input.allowsMotion, dragStart == nil,
+      zoomStart == nil
+    else { return 0 }
+    return input.activity.speed
+  }
+
+  private var allowsInteraction: Bool {
+    guard isAttached, input.isSceneActive, input.interaction != .disabled else { return false }
+    if case .suspended = input.activity { return false }
+    return true
+  }
+
+  var drawsContinuously: Bool { !isStopped && status == .ready && rotationSpeed != 0 }
+
+  func setAttached(_ attached: Bool) {
+    motion.update(at: CACurrentMediaTime(), speed: rotationSpeed)
+    isAttached = attached
+    if !attached {
+      dragStart = nil
+      zoomStart = nil
+    }
+    motion.update(at: CACurrentMediaTime(), speed: rotationSpeed)
+  }
+
+  func refreshCadence(_ view: MTKView) {
+    nativeView = view
+    let now = CACurrentMediaTime()
+    motion.update(at: now, speed: rotationSpeed)
+    hasDrawableSize =
+      !view.bounds.isEmpty && view.drawableSize.width > 0 && view.drawableSize.height > 0
+    motion.update(at: now, speed: rotationSpeed)
+    view.isPaused = !drawsContinuously || view.bounds.isEmpty
+    view.enableSetNeedsDisplay = view.isPaused
     #if os(macOS)
-    func makeNSView(context: Context) -> MTKView { makeView(context: context) }
-    func updateNSView(_ view: MTKView, context: Context) { update(view, renderer: context.coordinator) }
-    #else
-    func makeUIView(context: Context) -> MTKView { makeView(context: context) }
-    func updateUIView(_ view: MTKView, context: Context) { update(view, renderer: context.coordinator) }
+      view.preferredFramesPerSecond = min(120, view.window?.screen?.maximumFramesPerSecond ?? 60)
+    #elseif !os(visionOS)
+      view.preferredFramesPerSecond = min(
+        120, view.window?.windowScene?.screen.maximumFramesPerSecond ?? 60)
     #endif
-
-    private func makeView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
-        view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        view.colorPixelFormat = .bgra8Unorm_srgb
-        view.framebufferOnly = true
-        view.isPaused = true
-        view.enableSetNeedsDisplay = true
-        #if !os(macOS)
-        view.isOpaque = false
-        view.backgroundColor = .clear
-        #endif
-        context.coordinator.configure(view)
-        return view
+    if view.isPaused, isAttached, input.isSceneActive, !view.bounds.isEmpty, status == .ready {
+      view.draw()
     }
+  }
 
-    private func update(_ view: MTKView, renderer: Renderer) {
-        renderer.update(
-            scene: scene,
-            camera: camera,
-            style: style,
-            layers: layers,
-            colorScheme: colorScheme,
-            autoRotationSpeed: autoRotationSpeed,
-            rotationClock: rotationClock,
-            performance: performance,
-            onMetrics: onMetrics
-        )
-        let animates = autoRotationSpeed != 0
-        view.preferredFramesPerSecond = preferredFramesPerSecond
-        view.enableSetNeedsDisplay = !animates
-        view.isPaused = !animates
-        if !animates { view.draw() }
+  private func deliverStatus() {
+    let next = status
+    guard onStatusChange != nil, deliveredStatus != next, pendingStatus != next else { return }
+    pendingStatus = next
+    statusDelivery?.cancel()
+    statusDelivery = Task { @MainActor [weak self] in
+      guard !Task.isCancelled, let self, !self.isStopped else { return }
+      self.pendingStatus = nil
+      self.deliveredStatus = next
+      self.onStatusChange?(next)
     }
+  }
 
-    private var preferredFramesPerSecond: Int {
-        switch performance {
-        case let .adaptive(minimum): min(max(30, minimum), 120)
-        case .exact: 120
-        case .batterySaver: 30
-        }
+  func stop(_ view: MTKView) {
+    guard !isStopped else { return }
+    isStopped = true
+    isAttached = false
+    view.isPaused = true
+    view.delegate = nil
+    nativeView = nil
+    statusDelivery?.cancel()
+    statusDelivery = nil
+    onStatusChange = nil
+    onCameraChange = nil
+    markerBuffer = nil
+    arcBuffer = nil
+    mask = nil
+    globe = nil
+    marker = nil
+    arc = nil
+    queue = nil
+  }
+
+  private func uploadMarkers() {
+    let values = input.markers.map { value -> SekaiMarkerGPU in
+      let p = SekaiVector3(
+        .init(latitude: value.coordinate.latitude, longitude: value.coordinate.longitude))
+      return SekaiMarkerGPU(
+        positionSize: SIMD4(
+          Float(p.x), Float(p.y), Float(p.z), Float(sekaiBound(value.size, 0...100, fallback: 6))),
+        color: value.color?.linear ?? SIMD4(0, 0, 0, -1)
+      )
     }
+    markerBuffer = buffer(values)
+    markerCount = values.count
+    markerUploads += 1
+  }
 
-    @MainActor final class Renderer: NSObject, MTKViewDelegate {
-        private struct ParticleGPU {
-            let batch: SekaiPreparedParticleBatch
-            let buffer: MTLBuffer?
-        }
-
-        private struct SurfaceGPU {
-            let batch: SekaiPreparedSurfaceBatch
-            let fillBuffers: [MTLBuffer?]
-            let lineBuffers: [MTLBuffer?]
-        }
-
-        private struct LineGPU {
-            let batch: SekaiPreparedLineBatch
-            let buffer: MTLBuffer?
-        }
-
-        private struct PointGPU {
-            let batch: SekaiPreparedPointBatch
-            let buffer: MTLBuffer?
-        }
-
-        private var queue: MTLCommandQueue?
-        private var particlePipeline: MTLRenderPipelineState?
-        private var linePipeline: MTLRenderPipelineState?
-        private var device: MTLDevice?
-        private var particleBatches: [ParticleGPU] = []
-        private var surfaceBatches: [SurfaceGPU] = []
-        private var lineBatches: [LineGPU] = []
-        private var pointBatches: [PointGPU] = []
-        private var drawOrder: [SekaiPreparedDrawReference] = []
-        private var loadedScene: ObjectIdentifier?
-        private var camera = SekaiCamera.standard
-        private var style = SekaiStyle.standard
-        private var visualStyles = SekaiLayerVisualStyles(layers: [])
-        private var isDark = false
-        private var autoRotationSpeed = 0.0
-        private var rotationClock: SekaiRotationClock?
-        private var metricsCallback: @MainActor (SekaiRenderMetrics) -> Void = { _ in }
-        private var policy: SekaiPerformancePolicy = .adaptive()
-        private var adaptiveQuality = 1.0
-        private var adaptiveLOD = 0
-        private var lowFrameWindows = 0
-        private var highFrameWindows = 0
-        private var metricEpoch = Date.timeIntervalSinceReferenceDate
-        private var metricFrames = 0
-
-        func configure(_ view: MTKView) {
-            guard let device = view.device,
-                  let library = try? device.makeDefaultLibrary(bundle: .module),
-                  let vertex = library.makeFunction(name: "sekaiUnifiedParticleVertex"),
-                  let fragment = library.makeFunction(name: "sekaiUnifiedParticleFragment") else { return }
-            let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.vertexFunction = vertex
-            descriptor.fragmentFunction = fragment
-            descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
-            descriptor.colorAttachments[0].isBlendingEnabled = true
-            descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-            descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-            descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
-            descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-            particlePipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
-            descriptor.fragmentFunction = library.makeFunction(name: "sekaiUnifiedLineFragment")
-            linePipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
-            self.device = device
-            queue = device.makeCommandQueue()
-            view.delegate = self
-        }
-
-        func update(
-            scene: SekaiPreparedScene?,
-            camera: SekaiCamera,
-            style: SekaiStyle,
-            layers: [SekaiLayer],
-            colorScheme: ColorScheme,
-            autoRotationSpeed: Double,
-            rotationClock: SekaiRotationClock,
-            performance: SekaiPerformancePolicy,
-            onMetrics: @escaping @MainActor (SekaiRenderMetrics) -> Void
-        ) {
-            if policy != performance {
-                policy = performance
-                resetAdaptiveState()
-            }
-            metricsCallback = onMetrics
-            self.camera = camera
-            self.style = style
-            visualStyles = SekaiLayerVisualStyles(layers: layers)
-            isDark = colorScheme == .dark
-            self.autoRotationSpeed = autoRotationSpeed
-            self.rotationClock = rotationClock
-
-            if let scene, loadedScene != ObjectIdentifier(scene) {
-                loadedScene = ObjectIdentifier(scene)
-                particleBatches = scene.particleBatches.map { ParticleGPU(batch: $0, buffer: makeBuffer($0.vertices)) }
-                surfaceBatches = scene.surfaceBatches.map { batch in
-                    SurfaceGPU(
-                        batch: batch,
-                        fillBuffers: batch.fillVerticesByLevelOfDetail.map(makeBuffer),
-                        lineBuffers: batch.lineVerticesByLevelOfDetail.map(makeBuffer)
-                    )
-                }
-                lineBatches = scene.lineBatches.map { LineGPU(batch: $0, buffer: makeBuffer($0.vertices)) }
-                pointBatches = scene.pointBatches.map { PointGPU(batch: $0, buffer: makeBuffer($0.vertices)) }
-                drawOrder = scene.drawOrder
-            } else if scene == nil {
-                loadedScene = nil
-                particleBatches = []
-                surfaceBatches = []
-                lineBatches = []
-                pointBatches = []
-                drawOrder = []
-            }
-        }
-
-        private func resetAdaptiveState() {
-            lowFrameWindows = 0
-            highFrameWindows = 0
-            switch policy {
-            case .exact:
-                adaptiveQuality = 1
-                adaptiveLOD = 0
-            case .batterySaver:
-                adaptiveQuality = 0.25
-                adaptiveLOD = 2
-            case .adaptive:
-                adaptiveQuality = 1
-                adaptiveLOD = 0
-            }
-        }
-
-        private func makeBuffer(_ values: [PackedParticle]) -> MTLBuffer? {
-            values.withUnsafeBytes { bytes in
-                guard let base = bytes.baseAddress, !bytes.isEmpty else { return nil }
-                return device?.makeBuffer(bytes: base, length: bytes.count, options: .storageModeShared)
-            }
-        }
-
-        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
-
-        func draw(in view: MTKView) {
-            guard let particlePipeline, let linePipeline, let queue,
-                  let command = queue.makeCommandBuffer(),
-                  let pass = view.currentRenderPassDescriptor,
-                  let drawable = view.currentDrawable,
-                  let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
-
-            var uniforms = baseUniforms(view: view)
-            var submittedParticles = 0
-            let logicalParticles = particleBatches.reduce(0) { $0 + $1.batch.vertices.count }
-
-            for reference in drawOrder {
-                switch reference {
-                case let .particles(index):
-                    guard particleBatches.indices.contains(index) else { continue }
-                    let gpu = particleBatches[index]
-                    guard let buffer = gpu.buffer else { continue }
-                    let particleStyle = visualStyles.particles[gpu.batch.layerID]
-                        ?? gpu.batch.styleOverride
-                        ?? style.particles
-                    let count = min(
-                        gpu.batch.vertices.count,
-                        max(gpu.batch.vertices.isEmpty ? 0 : 1, Int(Double(gpu.batch.vertices.count) * adaptiveQuality))
-                    )
-                    guard count > 0 else { continue }
-                    submittedParticles += count
-                    apply(particleStyle, to: &uniforms)
-                    encoder.setRenderPipelineState(particlePipeline)
-                    encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                    encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-                    encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: count)
-
-                case let .surface(index):
-                    guard surfaceBatches.indices.contains(index) else { continue }
-                    let gpu = surfaceBatches[index]
-                    let boundaryStyle = visualStyles.boundaries[gpu.batch.layerID]
-                        ?? gpu.batch.styleOverride
-                        ?? style.boundaries
-                    let level = min(adaptiveLOD, max(gpu.lineBuffers.count - 1, 0))
-                    if gpu.batch.fillVerticesByLevelOfDetail.indices.contains(level),
-                       let buffer = gpu.fillBuffers[level] {
-                        applyBoundaryFill(boundaryStyle, to: &uniforms)
-                        encoder.setRenderPipelineState(linePipeline)
-                        encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                        encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-                        encoder.drawPrimitives(
-                            type: .triangle,
-                            vertexStart: 0,
-                            vertexCount: gpu.batch.fillVerticesByLevelOfDetail[level].count
-                        )
-                    }
-                    if gpu.batch.lineVerticesByLevelOfDetail.indices.contains(level),
-                       let buffer = gpu.lineBuffers[level] {
-                        applyBoundaryLine(boundaryStyle, to: &uniforms)
-                        encoder.setRenderPipelineState(linePipeline)
-                        encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                        encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-                        let count = gpu.batch.lineVerticesByLevelOfDetail[level].count
-                        encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: count)
-                        if boundaryStyle.strokeWidth > 1 {
-                            encoder.setRenderPipelineState(particlePipeline)
-                            encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-                            encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: count)
-                        }
-                    }
-
-                case let .line(index):
-                    guard lineBatches.indices.contains(index) else { continue }
-                    let gpu = lineBatches[index]
-                    guard let buffer = gpu.buffer, !gpu.batch.vertices.isEmpty else { continue }
-                    let routeStyle = gpu.batch.styleOverride ?? style.routes
-                    apply(routeStyle, to: &uniforms)
-                    encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                    encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-                    encoder.setRenderPipelineState(linePipeline)
-                    encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gpu.batch.vertices.count)
-                    encoder.setRenderPipelineState(particlePipeline)
-                    encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-                    encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: gpu.batch.vertices.count)
-
-                case let .points(index):
-                    guard pointBatches.indices.contains(index) else { continue }
-                    let gpu = pointBatches[index]
-                    guard let buffer = gpu.buffer, !gpu.batch.vertices.isEmpty else { continue }
-                    apply(gpu.batch.material, to: &uniforms)
-                    encoder.setRenderPipelineState(particlePipeline)
-                    encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                    encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-                    encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: gpu.batch.vertices.count)
-                }
-            }
-
-            encoder.endEncoding()
-            command.present(drawable)
-            command.commit()
-            recordMetrics(logical: logicalParticles, submitted: submittedParticles)
-        }
-
-        private func baseUniforms(view: MTKView) -> Uniforms {
-            let sun = SekaiVector3(SekaiCoordinate(
-                latitude: style.environment.sunLatitude,
-                longitude: style.environment.sunLongitude
-            )).normalized()
-            return Uniforms(
-                quaternion: SIMD4(
-                    Float(camera.orientation.x), Float(camera.orientation.y),
-                    Float(camera.orientation.z), Float(camera.orientation.w)
-                ),
-                color: SIMD4(0, 0, 0, 1),
-                viewport: SIMD2(Float(view.drawableSize.width), Float(view.drawableSize.height)),
-                offset: SIMD2(Float(camera.offsetX), Float(camera.offsetY)),
-                zoom: Float(camera.zoom),
-                pointSize: 1,
-                spinAngle: Float(rotationClock?.angle(speed: autoRotationSpeed) ?? 0),
-                reserved: 0,
-                projection: camera.projection.fieldOfViewDegrees == 0 ? 0 : 1,
-                projectionScale: camera.projection.fieldOfViewDegrees == 0
-                    ? 1 : Float(1 / tan(camera.projection.fieldOfViewDegrees * .pi / 360)),
-                optical: SIMD4(1, 0.7, 0.55, 0.28),
-                material: SIMD4(0.55, 0, 0, 0),
-                environment: SIMD4(
-                    Float(sun.x), Float(sun.y), Float(sun.z),
-                    style.environment.showsDayNightTerminator ? Float(style.environment.ambientLight) : -1
-                )
-            )
-        }
-
-        private func apply(_ particleStyle: SekaiParticleStyle, to uniforms: inout Uniforms) {
-            uniforms.color = particleStyle.color.sekaiMetalColor(
-                dark: isDark,
-                opacity: particleStyle.opacity
-            )
-            uniforms.pointSize = Float(max(particleStyle.minimumPixelDiameter, particleStyle.size))
-            uniforms.optical = SIMD4(
-                Float(particleStyle.brightness), Float(particleStyle.highlight),
-                Float(particleStyle.refraction), Float(particleStyle.depthFade)
-            )
-            uniforms.material = SIMD4(0.58, 0, 0, 0)
-        }
-
-        private func applyBoundaryFill(_ boundaryStyle: SekaiBoundaryStyle, to uniforms: inout Uniforms) {
-            uniforms.color = boundaryStyle.fillColor.sekaiMetalColor(
-                dark: isDark,
-                opacity: boundaryStyle.fillOpacity
-            )
-            uniforms.optical = SIMD4(1, Float(boundaryStyle.highlight), Float(boundaryStyle.refraction), 0.15)
-            uniforms.material = SIMD4(0.58, 0, 0, 0)
-        }
-
-        private func applyBoundaryLine(_ boundaryStyle: SekaiBoundaryStyle, to uniforms: inout Uniforms) {
-            uniforms.color = boundaryStyle.strokeColor.sekaiMetalColor(
-                dark: isDark,
-                opacity: boundaryStyle.strokeOpacity
-            )
-            uniforms.pointSize = Float(max(0.5, boundaryStyle.strokeWidth))
-            uniforms.optical = SIMD4(1, Float(boundaryStyle.highlight), Float(boundaryStyle.refraction), 0.15)
-            uniforms.material = SIMD4(0.52, 0.08, 0, 0)
-        }
-
-        private func apply(_ routeStyle: SekaiRouteStyle, to uniforms: inout Uniforms) {
-            uniforms.color = routeStyle.color.sekaiMetalColor(opacity: routeStyle.opacity)
-            uniforms.pointSize = Float(max(0.5, routeStyle.width))
-            uniforms.optical = SIMD4(1, Float(routeStyle.highlight), 0.45, 0.12)
-            uniforms.material = SIMD4(0.52, 0.12, 0, 0)
-        }
-
-        private func apply(_ material: SekaiPreparedPointMaterial, to uniforms: inout Uniforms) {
-            switch material {
-            case let .annotation(override):
-                let annotationStyle = override ?? style.annotations
-                uniforms.color = annotationStyle.color.sekaiMetalColor(opacity: annotationStyle.opacity)
-                uniforms.pointSize = Float(max(2, annotationStyle.size * 9))
-                uniforms.optical = SIMD4(1, Float(annotationStyle.highlight), 0.42, 0.08)
-                uniforms.material = SIMD4(Float(annotationStyle.core), Float(annotationStyle.halo), 0, 0)
-            case let .routeEndpoint(override):
-                let routeStyle = override ?? style.routes
-                uniforms.color = routeStyle.color.sekaiMetalColor(opacity: routeStyle.opacity)
-                uniforms.pointSize = Float(max(2, routeStyle.endpointSize * 100))
-                uniforms.optical = SIMD4(1, Float(routeStyle.highlight), 0.45, 0.08)
-                uniforms.material = SIMD4(0.48, 0.32, 0, 0)
-            case let .heat(weight):
-                let value = min(max(weight, 0), 1)
-                let color = SekaiColor(red: value, green: 0.28 + (1 - value) * 0.35, blue: 1 - value * 0.72)
-                uniforms.color = color.sekaiMetalColor(opacity: 0.3 + value * 0.45)
-                uniforms.pointSize = Float(14 + value * 30)
-                uniforms.optical = SIMD4(1.15, 0.8, 0.35, 0.1)
-                uniforms.material = SIMD4(0.2, 0.9, 0, 0)
-            }
-        }
-
-        private func recordMetrics(logical: Int, submitted: Int) {
-            metricFrames += 1
-            let now = Date.timeIntervalSinceReferenceDate
-            let duration = now - metricEpoch
-            guard duration >= 1 else { return }
-            let framesPerSecond = Double(metricFrames) / duration
-            adjustQuality(framesPerSecond: framesPerSecond)
-            metricsCallback(SekaiRenderMetrics(
-                logicalParticleCount: logical,
-                requestedParticleCount: logical,
-                renderedParticleCount: submitted,
-                culledParticleCount: max(0, logical - submitted),
-                framesPerSecond: framesPerSecond,
-                frameTimeMilliseconds: framesPerSecond > 0 ? 1_000 / framesPerSecond : 0,
-                renderScale: 1,
-                levelOfDetail: adaptiveLOD,
-                policy: policy
-            ))
-            metricFrames = 0
-            metricEpoch = now
-        }
-
-        private func adjustQuality(framesPerSecond: Double) {
-            guard case let .adaptive(minimumFramesPerSecond) = policy else { return }
-            let target = Double(max(minimumFramesPerSecond, 1))
-            if framesPerSecond < target * 0.9 {
-                lowFrameWindows += 1
-                highFrameWindows = 0
-                if lowFrameWindows >= 2 {
-                    adaptiveQuality = max(0.125, adaptiveQuality * 0.72)
-                    adaptiveLOD = adaptiveQuality >= 0.72 ? 0 : adaptiveQuality >= 0.3 ? 1 : 2
-                    lowFrameWindows = 0
-                }
-            } else if (adaptiveQuality < 1 && framesPerSecond >= target * 0.97)
-                        || framesPerSecond > target * 1.02 {
-                highFrameWindows += 1
-                lowFrameWindows = 0
-                if highFrameWindows >= 3 {
-                    adaptiveQuality = min(1, adaptiveQuality / 0.82)
-                    adaptiveLOD = adaptiveQuality >= 0.72 ? 0 : adaptiveQuality >= 0.3 ? 1 : 2
-                    highFrameWindows = 0
-                }
-            } else {
-                lowFrameWindows = 0
-                highFrameWindows = 0
-            }
-        }
+  private func uploadArcs() {
+    let values = input.arcs.map { value -> SekaiArcGPU in
+      let a = SekaiVector3(.init(latitude: value.from.latitude, longitude: value.from.longitude))
+      let b = SekaiVector3(.init(latitude: value.to.latitude, longitude: value.to.longitude))
+      return SekaiArcGPU(
+        fromHeight: SIMD4(
+          Float(a.x), Float(a.y), Float(a.z), Float(sekaiBound(value.height, 0...2, fallback: 0.15))
+        ),
+        toWidth: SIMD4(
+          Float(b.x), Float(b.y), Float(b.z), Float(sekaiBound(value.width, 0...30, fallback: 1.5))),
+        color: value.color?.linear ?? SIMD4(0, 0, 0, -1)
+      )
     }
+    arcBuffer = buffer(values)
+    arcCount = values.count
+    arcUploads += 1
+  }
+
+  private func buffer<T>(_ values: [T]) -> MTLBuffer? {
+    guard !values.isEmpty else { return nil }
+    let result = values.withUnsafeBytes { bytes in
+      device?.makeBuffer(
+        bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+    }
+    if result == nil {
+      status = .failed(.allocationFailed)
+      deliverStatus()
+    }
+    return result
+  }
+
+  func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { refreshCadence(view) }
+
+  func draw(in view: MTKView) {
+    guard !isStopped, isAttached, input.isSceneActive, !view.bounds.isEmpty,
+      let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable
+    else { return }
+    let scale = Double(view.drawableSize.width / max(view.bounds.width, 1))
+    do {
+      _ = try submit(
+        pass: pass, size: view.drawableSize, scale: scale, at: CACurrentMediaTime(),
+        drawable: drawable)
+    } catch let error as SekaiRenderError {
+      status = .failed(error)
+      view.isPaused = true
+      deliverStatus()
+    } catch {
+      status = .failed(.pipelineUnavailable)
+      view.isPaused = true
+      deliverStatus()
+    }
+  }
+
+  func render(to texture: MTLTexture, at time: Double = CACurrentMediaTime()) throws
+    -> MTLCommandBuffer?
+  {
+    let pass = MTLRenderPassDescriptor()
+    pass.colorAttachments[0].texture = texture
+    pass.colorAttachments[0].loadAction = .clear
+    pass.colorAttachments[0].storeAction = .store
+    pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+    return try submit(
+      pass: pass, size: CGSize(width: texture.width, height: texture.height), scale: 1, at: time,
+      drawable: nil)
+  }
+
+  private func submit(
+    pass: MTLRenderPassDescriptor, size: CGSize, scale: Double, at time: Double,
+    drawable: CAMetalDrawable?
+  ) throws -> MTLCommandBuffer? {
+    guard !isStopped, status == .ready, let queue, let globe, let marker, let arc, let mask else {
+      if case .failed(let error) = status { throw error }
+      throw SekaiRenderError.pipelineUnavailable
+    }
+    guard inFlight.wait(timeout: .now()) == .success else { return nil }
+    guard let command = queue.makeCommandBuffer(),
+      let encoder = command.makeRenderCommandEncoder(descriptor: pass)
+    else {
+      inFlight.signal()
+      throw SekaiRenderError.allocationFailed
+    }
+    var uniforms = uniforms(size: size, scale: scale, at: time)
+    encoder.setRenderPipelineState(globe)
+    encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SekaiUniforms>.stride, index: 0)
+    encoder.setFragmentTexture(mask, index: 0)
+    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    encoder.setVertexBytes(&uniforms, length: MemoryLayout<SekaiUniforms>.stride, index: 1)
+    if let arcBuffer, arcCount > 0 {
+      encoder.setRenderPipelineState(arc)
+      encoder.setVertexBuffer(arcBuffer, offset: 0, index: 0)
+      encoder.drawPrimitives(
+        type: .triangleStrip, vertexStart: 0, vertexCount: 130, instanceCount: arcCount)
+    }
+    if let markerBuffer, markerCount > 0 {
+      encoder.setRenderPipelineState(marker)
+      encoder.setVertexBuffer(markerBuffer, offset: 0, index: 0)
+      encoder.drawPrimitives(
+        type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: markerCount)
+    }
+    encoder.endEncoding()
+    if let drawable { command.present(drawable) }
+    let semaphore = inFlight
+    #if DEBUG
+      let completions = completions
+    #endif
+    command.addCompletedHandler { [weak self] command in
+      semaphore.signal()
+      #if DEBUG
+        completions.record()
+      #endif
+      if command.status == .error {
+        Task { @MainActor [weak self] in
+          guard let self, !self.isStopped else { return }
+          self.status = .failed(.renderingFailed)
+          self.nativeView?.isPaused = true
+          self.deliverStatus()
+        }
+      }
+    }
+    submittedFrames += 1
+    command.commit()
+    return command
+  }
+
+  private func uniforms(size: CGSize, scale: Double, at now: Double) -> SekaiUniforms {
+    motion.update(at: now, speed: rotationSpeed)
+    let camera = input.camera.normalized
+    let spin = SekaiQuaternion.axisAngle(x: 0, y: 1, z: 0, radians: motion.angle)
+    let orientation = camera.orientation * spin
+    let palette = input.style.palette(dark: input.dark)
+    return SekaiUniforms(
+      orientation: SIMD4(
+        Float(orientation.x), Float(orientation.y), Float(orientation.z), Float(orientation.w)),
+      viewport: SIMD4(
+        Float(max(size.width, 1)), Float(max(size.height, 1)), Float(scale), Float(camera.zoom)),
+      camera: SIMD4(
+        Float(camera.offsetX), Float(camera.offsetY),
+        Float(min(max(input.style.sampleCount, 512), 32_768)),
+        Float(sekaiBound(input.style.dotSize, 0.001...0.06, fallback: 0.008))),
+      ocean: palette.ocean.linear, land: palette.land.linear, glow: palette.glow.linear,
+      options: SIMD4(
+        Float(sekaiBound(input.style.brightness, 0...4, fallback: 1)),
+        Float(sekaiBound(input.style.diffuse, 0...8, fallback: 1)),
+        Float(sekaiBound(input.style.opacity, 0...1, fallback: 1)),
+        Float(sekaiBound(input.style.glow, 0...0.5, fallback: 0.12))),
+      markerColor: input.style.markerColor.linear, arcColor: input.style.arcColor.linear
+    )
+  }
+
+  func beginRotation() {
+    guard allowsInteraction else { return }
+    let angle = motion.consume(at: CACurrentMediaTime())
+    input.camera.orientation =
+      input.camera.orientation * .axisAngle(x: 0, y: 1, z: 0, radians: angle)
+    dragStart = input.camera.orientation
+    motion.update(at: CACurrentMediaTime(), speed: 0)
+    onCameraChange?(input.camera)
+  }
+
+  func rotate(translation: CGSize) {
+    guard allowsInteraction, let start = dragStart else { return }
+    let yaw = SekaiQuaternion.axisAngle(
+      x: 0, y: 1, z: 0, radians: Double(translation.width) * .pi / 360)
+    let pitch = SekaiQuaternion.axisAngle(
+      x: 1, y: 0, z: 0, radians: Double(translation.height) * .pi / 360)
+    input.camera.orientation = pitch * yaw * start
+    onCameraChange?(input.camera)
+  }
+
+  func endRotation() {
+    dragStart = nil
+    motion.update(at: CACurrentMediaTime(), speed: rotationSpeed)
+  }
+
+  func beginZoom() {
+    guard allowsInteraction, input.interaction == .rotationAndZoom else { return }
+    let now = CACurrentMediaTime()
+    motion.update(at: now, speed: rotationSpeed)
+    zoomStart = input.camera.zoom
+    motion.update(at: now, speed: 0)
+  }
+  func zoom(scale: Double) {
+    guard allowsInteraction, input.interaction == .rotationAndZoom, let start = zoomStart else {
+      return
+    }
+    input.camera.zoom = sekaiBound(start * scale, 0.5...4, fallback: 1)
+    onCameraChange?(input.camera)
+  }
+  func endZoom() {
+    zoomStart = nil
+    motion.update(at: CACurrentMediaTime(), speed: rotationSpeed)
+  }
 }
 
-private struct Uniforms {
-    var quaternion: SIMD4<Float>
-    var color: SIMD4<Float>
-    var viewport: SIMD2<Float>
-    var offset: SIMD2<Float>
-    var zoom: Float
-    var pointSize: Float
-    var spinAngle: Float
-    var reserved: Float
-    var projection: UInt32
-    var projectionScale: Float
-    var optical: SIMD4<Float>
-    var material: SIMD4<Float>
-    var environment: SIMD4<Float>
-}
+#if DEBUG
+  private final class SekaiCompletionCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
 
-private extension SekaiAdaptiveColor {
-    func sekaiMetalColor(dark: Bool, opacity: Double) -> SIMD4<Float> {
-        sekaiResolved(dark: dark).sekaiMetalColor(opacity: opacity)
-    }
-}
-
-private extension SekaiColor {
-    func sekaiMetalColor(opacity: Double) -> SIMD4<Float> {
-        let value = normalized()
-        return SIMD4(
-            Float(value.red), Float(value.green), Float(value.blue),
-            Float(value.alpha * min(max(opacity, 0), 1))
-        )
-    }
-}
-#else
-import SwiftUI
-
-struct SekaiMetalView: View {
-    let scene: SekaiPreparedScene?
-    let camera: SekaiCamera
-    let style: SekaiStyle
-    let layers: [SekaiLayer]
-    let colorScheme: ColorScheme
-    let autoRotationSpeed: Double
-    let rotationClock: SekaiRotationClock
-    let performance: SekaiPerformancePolicy
-    let onMetrics: @MainActor (SekaiRenderMetrics) -> Void
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: autoRotationSpeed == 0)) { timeline in
-            Canvas { context, size in
-                guard let scene else { return }
-                let spin = rotationClock.angle(
-                    at: timeline.date.timeIntervalSinceReferenceDate,
-                    speed: autoRotationSpeed
-                )
-                let projection = SekaiProjectionContext(size: size, camera: camera, spinAngle: spin)
-                let points = scene.particleBatches.lazy.flatMap(\.vertices).prefix(4_096)
-                for particle in points {
-                    let vector = SekaiVector3(
-                        x: Double(particle.position.x),
-                        y: Double(particle.position.y),
-                        z: Double(particle.position.z)
-                    )
-                    guard let projected = projection.project(vector) else { continue }
-                    context.fill(
-                        Path(ellipseIn: CGRect(x: projected.point.x, y: projected.point.y, width: 1, height: 1)),
-                        with: .color(.primary)
-                    )
-                }
-            }
-        }
-    }
-}
+    func record() { lock.withLock { count += 1 } }
+    var value: Int { lock.withLock { count } }
+  }
 #endif

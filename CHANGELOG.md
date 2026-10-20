@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.0
+
+- Replaced the atlas and generic layer engine with one native Metal globe,
+  a compact land mask, markers, and raised great-circle arcs.
+- Added a single SwiftUI entry point with explicit activity and a typed
+  rendering status callback.
+- Moved automatic rotation into the renderer's activity lifecycle. Static and
+  suspended globes do not run a continuous SwiftUI timeline.
+- Added automatic, Light, and Dark styles without a duplicate glass sphere.
+- Replaced the broad Inspector demo with a small native globe example.
+- Removed the 1.x atlas, GIS layers, optional products, perspective, and
+  watchOS Canvas path. See [the migration guide](MIGRATION.md).
+- Adapted COBE's analytical renderer with full MIT attribution. REA was used
+  for source analysis and is not a runtime dependency.
+
 ## 1.1.0
 
 - Added atlas, annotation, route, polygon, circle, heat-point, and hover hit

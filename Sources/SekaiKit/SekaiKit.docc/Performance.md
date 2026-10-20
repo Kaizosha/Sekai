@@ -1,24 +1,24 @@
 # Performance
 
-Sekai uploads contiguous point and overlay buffers once per scene change.
-Camera, appearance, and optical changes update small uniforms. Automatic
-rotation is shader-side. A static `MTKView` is paused and draws only after
-state changes.
+The globe's fragment shader reconstructs the sphere and finds nearby Fibonacci
+samples. Its main cost depends on drawable pixels. Sample count is a uniform,
+rather than the length of an uploaded point array.
 
-`.automatic` prepares up to 262,144 particles in adaptive mode, 32,768 in
-battery-saver mode, and the source maximum in exact mode. Explicit count,
-fraction, and maximum requests retain their logical meaning.
+Markers and arcs add GPU work when present. They retain their buffers across
+camera and appearance changes. The package does not publish draw submissions
+as measured displayed frames per second.
 
-Use `.adaptive(minimumFramesPerSecond: 60)` for interactive apps. Use `.exact`
-for captures, controlled hardware, or deliberate maximum-density presentation.
-Use `.batterySaver` for ambient and low-power surfaces.
+An active rotating globe uses native rendering cadence. A static globe draws
+on demand. Suspension and inactive presentation stop autonomous drawing and
+preserve the accumulated angle. Use `.suspended` when a host-owned sheet covers
+the globe.
 
-Adaptive mode measures rolling presentation rate. Two low-rate windows reduce
-the submitted deterministic prefix and boundary detail; three healthy windows
-restore quality. Hysteresis prevents oscillation. `SekaiRenderMetrics` reports
-logical, submitted, policy-culled, frame-time, and LOD values. Exact mode never
-adapts requested geometry.
+Measure a Release build on the intended physical device. Record drawable size,
+render scale, appearance, sample count, overlay count, and target refresh rate.
+Check actual present intervals, GPU duration, main-thread work, memory, and
+thermal state. Verify output and failures during every comparison.
 
-Measure release builds on physical devices. Test static, rotation, drag, zoom,
-all land, a small map unit, aggregate countries, boundaries, routes, markers,
-light/dark appearance, Reduce Motion, low-power mode, and thermal pressure.
+Include rotation, direct manipulation, resize, background and foreground,
+Reduce Motion, repeated presentation, and a settled suspended interval. A
+suspended interval must produce no autonomous submissions after in-flight work
+finishes. A lower source size or vertex count alone is not a measured speedup.

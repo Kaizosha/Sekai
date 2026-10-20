@@ -1,47 +1,47 @@
 # ``SekaiKit``
 
-Build a layered, interactive, offline globe from one high-detail atlas.
+Present an offline SwiftUI globe with native Metal rendering.
 
 ## Overview
 
-Sekai combines a SwiftUI-first API, native Liquid Glass presentation, a Metal
-geography renderer, and a reproducible Natural Earth 1:10m atlas. The package
-does not require MapKit, a network connection, or host assets.
+Sekai 2 contains a shaded globe, land dots, markers, arcs, and a quaternion
+camera. The host retains its camera binding and controls whether the globe
+is active or suspended.
 
 ```swift
 @State private var camera = SekaiCamera.standard
 
-Sekai(camera: $camera) {
-    SekaiLayer.landParticles()
-}
+Sekai(camera: $camera)
 ```
+
+The package uses one bundled land mask. It does not require a network,
+MapKit, a WebView, or location permission.
 
 ## Topics
 
-### Essentials
+### Start and migrate
 
 - <doc:GettingStarted>
-- <doc:Architecture>
-- <doc:Atlas>
-- <doc:Layers>
+- <doc:Migration>
 
-### Presentation
+### Configure the globe
 
 - <doc:CameraAndInteraction>
 - <doc:Styling>
+- <doc:Architecture>
 - <doc:Performance>
-
-### Integration
-
-- <doc:OptionalModules>
 - <doc:TestingAndRelease>
 
-### Core API
+### Public values
 
 - ``Sekai``
-- ``SekaiAtlas``
 - ``SekaiCamera``
+- ``SekaiCoordinate``
+- ``SekaiQuaternion``
 - ``SekaiStyle``
-- ``SekaiLayer``
-- ``SekaiFeature``
-- ``SekaiCodeExporter``
+- ``SekaiActivity``
+- ``SekaiInteraction``
+- ``SekaiMarker``
+- ``SekaiArc``
+- ``SekaiRenderStatus``
+- ``SekaiRenderError``
