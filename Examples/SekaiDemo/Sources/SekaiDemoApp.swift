@@ -72,7 +72,7 @@ private struct GlobeExample: View {
         .frame(maxWidth: .infinity)
         .padding()
       }
-      .scrollEdgeEffectStyle(.soft)
+      .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
       .navigationTitle("Sekai")
     }
   }
