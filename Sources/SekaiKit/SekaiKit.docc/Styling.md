@@ -18,3 +18,15 @@ and toolbars without layering another material over the globe.
 Compose the globe over the host background and inspect transparent edges in
 Light and Dark appearances. Do not assume one palette is legible on every
 custom background.
+
+## Territory materials
+
+`SekaiRegionHighlight` applies one color across a territory's land dots. Pass
+highlights through `Sekai`'s `regions` argument. Codes use ISO 3166-1 alpha-2.
+Unknown codes and macroregions have no territory fill. Repeated codes use the
+last material. Territory colors are host values and do not infer appearance.
+
+A supplied `fallbackCoordinate` draws a five-point anchor only when that
+territory has no dot at the requested density. This keeps tiny islands visible
+without painting neighboring land. The host remains responsible for choosing
+a representative coordinate and explaining what its selection means.

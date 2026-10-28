@@ -42,10 +42,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Historical Natural Earth data
+## Natural Earth data
 
-Sekai 1.x used Natural Earth 5.1.1 1:10m Admin 0 Map Units data, which is in
-the public domain. Sekai 2 does not distribute the 1.x atlas or atlas builder.
-Historical provenance remains in the 1.1.0 tag.
+The compact territory mask derives from Natural Earth 5.1.1 1:10m Admin 0 Map
+Units, which is in the public domain. The pinned archive checksum and repeatable
+generator are recorded in [Tools/RegionMask](Tools/RegionMask/README.md).
+Sekai does not distribute the historical 1.x point atlas.
 
 - [Natural Earth terms](https://www.naturalearthdata.com/about/terms-of-use/).

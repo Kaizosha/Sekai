@@ -4,7 +4,7 @@ Present an offline SwiftUI globe with native Metal rendering.
 
 ## Overview
 
-Sekai 2 contains a shaded globe, land dots, markers, arcs, and a quaternion
+Sekai 2 contains a shaded globe, land dots, territory highlights, markers, arcs, and a quaternion
 camera. The host retains its camera binding and controls whether the globe
 is active or suspended.
 
@@ -14,7 +14,7 @@ is active or suspended.
 Sekai(camera: $camera)
 ```
 
-The package uses one bundled land mask. It does not require a network,
+The package uses bundled land and territory masks. It does not require a network,
 MapKit, a WebView, or location permission.
 
 ## Topics
@@ -43,5 +43,6 @@ MapKit, a WebView, or location permission.
 - ``SekaiInteraction``
 - ``SekaiMarker``
 - ``SekaiArc``
+- ``SekaiRegionHighlight``
 - ``SekaiRenderStatus``
 - ``SekaiRenderError``

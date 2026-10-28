@@ -64,7 +64,7 @@ vertex GlobeOut sekaiGlobeVertex(uint id [[vertex_id]]) {
     const float2 corners[] = {float2(-1,-1), float2(3,-1), float2(-1,3)};
     return {float4(corners[id], 0, 1)};
 }
-fragment float4 sekaiGlobeFragment(GlobeOut input [[stage_in]], constant SekaiUniforms &u [[buffer(0)]], texture2d<float> mask [[texture(0)]]) {
+fragment float4 sekaiGlobeFragment(GlobeOut input [[stage_in]], constant SekaiUniforms &u [[buffer(0)]], texture2d<float> mask [[texture(0)]], texture2d<uint> regions [[texture(1)]], constant float4 *regionColors [[buffer(2)]]) {
     float shortest = max(min(u.viewport.x, u.viewport.y), 1.0);
     float2 plane = float2(input.position.x * 2 - u.viewport.x, u.viewport.y - input.position.y * 2) / shortest;
     plane = (plane - u.camera.xy) / u.viewport.w;
@@ -83,14 +83,19 @@ fragment float4 sekaiGlobeFragment(GlobeOut input [[stage_in]], constant SekaiUn
         float2 uv = float2(atan2(sample.x, sample.z) / (2 * M_PI_F) + 0.5,
                           0.5 - asin(clamp(sample.y, -1.0, 1.0)) / M_PI_F);
         constexpr sampler mapSampler(coord::normalized, address::repeat, filter::nearest);
+        uint2 regionPixel = uint2(uint(fract(uv.x) * regions.get_width()),
+                                  min(regions.get_height() - 1, uint(clamp(uv.y, 0.0, 1.0) * regions.get_height())));
+        uint regionID = regions.read(regionPixel).r;
+        float4 regionColor = regionColors[regionID];
+        float4 landColor = regionColor.a < 0 ? u.land : regionColor;
         float land = mask.sample(mapSampler, uv).r;
         float coverageAA = max(fwidth(distance), 0.00002);
         float dots = land * (1 - smoothstep(max(0.0, u.camera.w - coverageAA), u.camera.w + coverageAA, distance));
         float lighting = 0.4 + 0.6 * pow(max(normal.z, 0.0), u.options.y);
-        float materialAlpha = mix(u.ocean.a, u.land.a, dots);
+        float materialAlpha = mix(u.ocean.a, landColor.a, dots);
         float surfaceAlpha = materialAlpha * sphereAlpha;
         float3 surface = mix(u.ocean.rgb * u.ocean.a,
-                             u.land.rgb * u.land.a * u.options.x, dots) * lighting;
+                             landColor.rgb * landColor.a * u.options.x, dots) * lighting;
         surface += pow(1 - max(normal.z, 0.0), 4.0) * u.glow.rgb * u.options.w * materialAlpha;
         color = float4(surface * sphereAlpha, surfaceAlpha) + color * (1 - surfaceAlpha);
     }

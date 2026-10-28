@@ -8,6 +8,7 @@ struct SekaiRenderInput: Equatable {
   var interaction = SekaiInteraction.rotationAndZoom
   var markers: [SekaiMarker] = []
   var arcs: [SekaiArc] = []
+  var regions: [SekaiRegionHighlight] = []
   var dark = false
   var allowsMotion = true
   var isSceneActive = true
@@ -42,6 +43,11 @@ final class SekaiRenderer: NSObject, MTKViewDelegate {
   private var marker: MTLRenderPipelineState?
   private var arc: MTLRenderPipelineState?
   private var mask: MTLTexture?
+  private var regionMask: MTLTexture?
+  private var regionColors: MTLBuffer?
+  private var fallbackMarkers: [SekaiMarker] = []
+  private var sampledRegions: Set<UInt16> = []
+  private var sampledRegionCount = 0
   private var markerBuffer: MTLBuffer?
   private var arcBuffer: MTLBuffer?
   private var markerCount = 0
@@ -66,6 +72,7 @@ final class SekaiRenderer: NSObject, MTKViewDelegate {
   #endif
   private(set) var markerUploads = 0
   private(set) var arcUploads = 0
+  private(set) var regionUploads = 0
   var onCameraChange: (@MainActor (SekaiCamera) -> Void)?
   private var onStatusChange: (@MainActor (SekaiRenderStatus) -> Void)?
 
@@ -98,6 +105,20 @@ final class SekaiRenderer: NSObject, MTKViewDelegate {
         device: device, library: library, vertex: "sekaiArcVertex", fragment: "sekaiArcFragment",
         format: pixelFormat)
       mask = try MTKTextureLoader(device: device).newTexture(URL: url, options: [.SRGB: false])
+      guard let regions = SekaiRegionMap.bundled else { throw SekaiRenderError.resourceUnavailable }
+      let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .r16Uint, width: regions.width, height: regions.height, mipmapped: false)
+      descriptor.storageMode = .shared
+      descriptor.usage = .shaderRead
+      regionMask = device.makeTexture(descriptor: descriptor)
+      guard let regionMask else { throw SekaiRenderError.allocationFailed }
+      regions.identifiers.withUnsafeBytes { bytes in
+        regionMask.replace(region: MTLRegionMake2D(0, 0, regions.width, regions.height),
+          mipmapLevel: 0, withBytes: bytes.baseAddress!, bytesPerRow: regions.width * 2)
+      }
+      regionColors = buffer([SIMD4<Float>](repeating: SIMD4(0, 0, 0, -1),
+        count: SekaiRegionMap.maximumIdentifier + 1))
+      guard regionColors != nil else { throw SekaiRenderError.allocationFailed }
       queue = device.makeCommandQueue()
       guard queue != nil else { throw SekaiRenderError.allocationFailed }
       status = .ready
@@ -144,6 +165,9 @@ final class SekaiRenderer: NSObject, MTKViewDelegate {
     onCameraChange = camera
     onStatusChange = status
     motion.update(at: CACurrentMediaTime(), speed: rotationSpeed)
+    if old.regions != input.regions || old.style.sampleCount != input.style.sampleCount {
+      uploadRegions()
+    }
     if old.markers != input.markers { uploadMarkers() }
     if old.arcs != input.arcs { uploadArcs() }
     if !allowsInteraction {
@@ -225,6 +249,10 @@ final class SekaiRenderer: NSObject, MTKViewDelegate {
     markerBuffer = nil
     arcBuffer = nil
     mask = nil
+    regionMask = nil
+    regionColors = nil
+    fallbackMarkers = []
+    sampledRegions = []
     globe = nil
     marker = nil
     arc = nil
@@ -232,7 +260,7 @@ final class SekaiRenderer: NSObject, MTKViewDelegate {
   }
 
   private func uploadMarkers() {
-    let values = input.markers.map { value -> SekaiMarkerGPU in
+    let values = (input.markers + fallbackMarkers).map { value -> SekaiMarkerGPU in
       let p = SekaiVector3(
         .init(latitude: value.coordinate.latitude, longitude: value.coordinate.longitude))
       return SekaiMarkerGPU(
@@ -244,6 +272,37 @@ final class SekaiRenderer: NSObject, MTKViewDelegate {
     markerBuffer = buffer(values)
     markerCount = values.count
     markerUploads += 1
+  }
+
+  private func uploadRegions() {
+    guard let map = SekaiRegionMap.bundled else { return }
+    let count = min(max(input.style.sampleCount, 512), 32_768)
+    if sampledRegionCount != count {
+      sampledRegions = map.sampledIdentifiers(count: count)
+      sampledRegionCount = count
+    }
+    var colors = [SIMD4<Float>](repeating: SIMD4(0, 0, 0, -1),
+      count: SekaiRegionMap.maximumIdentifier + 1)
+    var anchors: [SekaiMarker] = []
+    var highlights: [UInt16: SekaiRegionHighlight] = [:]
+    for highlight in input.regions {
+      if let identifier = SekaiRegionMap.identifier(for: highlight.regionCode) {
+        highlights[identifier] = highlight
+      }
+    }
+    for (identifier, highlight) in highlights.sorted(by: { $0.key < $1.key }) {
+      colors[Int(identifier)] = highlight.color.linear
+      if !sampledRegions.contains(identifier), let coordinate = highlight.fallbackCoordinate {
+        anchors.append(.init(id: "region-\(highlight.regionCode)", coordinate: coordinate,
+          size: 5, color: highlight.color))
+      }
+    }
+    regionColors = buffer(colors)
+    regionUploads += 1
+    if anchors != fallbackMarkers {
+      fallbackMarkers = anchors
+      uploadMarkers()
+    }
   }
 
   private func uploadArcs() {
@@ -316,7 +375,8 @@ final class SekaiRenderer: NSObject, MTKViewDelegate {
     pass: MTLRenderPassDescriptor, size: CGSize, scale: Double, at time: Double,
     drawable: CAMetalDrawable?
   ) throws -> MTLCommandBuffer? {
-    guard !isStopped, status == .ready, let queue, let globe, let marker, let arc, let mask else {
+    guard !isStopped, status == .ready, let queue, let globe, let marker, let arc, let mask,
+      let regionMask, let regionColors else {
       if case .failed(let error) = status { throw error }
       throw SekaiRenderError.pipelineUnavailable
     }
@@ -331,6 +391,8 @@ final class SekaiRenderer: NSObject, MTKViewDelegate {
     encoder.setRenderPipelineState(globe)
     encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SekaiUniforms>.stride, index: 0)
     encoder.setFragmentTexture(mask, index: 0)
+    encoder.setFragmentTexture(regionMask, index: 1)
+    encoder.setFragmentBuffer(regionColors, offset: 0, index: 2)
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     encoder.setVertexBytes(&uniforms, length: MemoryLayout<SekaiUniforms>.stride, index: 1)
     if let arcBuffer, arcCount > 0 {

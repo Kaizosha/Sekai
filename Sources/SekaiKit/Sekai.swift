@@ -8,6 +8,7 @@ public struct Sekai: View {
   private let interaction: SekaiInteraction
   private let markers: [SekaiMarker]
   private let arcs: [SekaiArc]
+  private let regions: [SekaiRegionHighlight]
   private let onStatusChange: (@MainActor (SekaiRenderStatus) -> Void)?
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.scenePhase) private var scenePhase
@@ -22,6 +23,7 @@ public struct Sekai: View {
     interaction: SekaiInteraction = .rotationAndZoom,
     markers: [SekaiMarker] = [],
     arcs: [SekaiArc] = [],
+    regions: [SekaiRegionHighlight] = [],
     onStatusChange: (@MainActor (SekaiRenderStatus) -> Void)? = nil
   ) {
     _camera = camera
@@ -30,6 +32,7 @@ public struct Sekai: View {
     self.interaction = interaction
     self.markers = markers
     self.arcs = arcs
+    self.regions = regions
     self.onStatusChange = onStatusChange
   }
 
@@ -37,7 +40,7 @@ public struct Sekai: View {
     SekaiMetalView(
       input: SekaiRenderInput(
         camera: camera, style: style, activity: activity, interaction: interaction,
-        markers: markers, arcs: arcs, dark: colorScheme == .dark,
+        markers: markers, arcs: arcs, regions: regions, dark: colorScheme == .dark,
         allowsMotion: !reduceMotion, isSceneActive: isVisible && scenePhase == .active
       ),
       onCameraChange: { camera = $0 },

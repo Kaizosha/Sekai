@@ -13,7 +13,7 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct SekaiMetalTests {
-  private func texture(
+  func texture(
     _ renderer: SekaiRenderer, size: Int = 256, format: MTLPixelFormat = .bgra8Unorm_srgb
   ) throws -> MTLTexture {
     let device = try #require(renderer.device, "Native Metal is required for the renderer checks")
@@ -25,7 +25,7 @@ struct SekaiMetalTests {
     return try #require(device.makeTexture(descriptor: descriptor))
   }
 
-  private func pixels(
+  func pixels(
     _ renderer: SekaiRenderer, input: SekaiRenderInput = .init(), at time: Double? = nil
   ) throws
     -> [UInt8]
@@ -355,7 +355,7 @@ struct SekaiMetalTests {
     return CGPoint(x: x / max(count, 1), y: y / max(count, 1))
   }
 
-  private func save(_ pixels: [UInt8], name: String) throws {
+  func save(_ pixels: [UInt8], name: String) throws {
     guard let directory = ProcessInfo.processInfo.environment["SEKAI_TEST_EVIDENCE_DIR"] else {
       return
     }

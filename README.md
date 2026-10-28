@@ -1,7 +1,7 @@
 # Sekai
 
 A native SwiftUI globe rendered with Metal. Sekai 2 focuses on a shaded globe,
-land dots, markers, and raised great-circle arcs.
+land dots, territory highlights, markers, and raised great-circle arcs.
 
 ```swift
 import SekaiKit
@@ -70,6 +70,24 @@ They are not a GIS routing or navigation service.
 The camera binding owns the requested orientation, zoom, and offset. Use
 `camera.focus(on:)` to center a coordinate. Projection is orthographic.
 
+## Highlight a territory
+
+Pass ISO 3166-1 alpha-2 region codes and colors to recolor that territory's land
+samples. This uses bundled Natural Earth data and performs no network request.
+
+```swift
+Sekai(camera: $camera, regions: [
+    .init(regionCode: "JP", color: .init(red: 0.35, green: 0.43, blue: 0.23))
+])
+```
+
+The material follows the existing globe dots rather than covering neighbors or
+ocean with a circular marker. Different region codes may use different colors.
+For repeated codes, the last material wins. Unknown and macroregion codes draw
+no highlight. An optional `fallbackCoordinate` draws a five-point anchor only
+when the current dot density has no sample in that territory. The host chooses
+whether that small-territory fallback is appropriate.
+
 ## Control activity
 
 Use `.suspended` when the globe is covered by another surface or is not needed.
@@ -100,8 +118,8 @@ renderer. Use the callback for host-specific messaging.
 
 ## Rendering model
 
-The globe uses inverse Fibonacci sampling in a fragment shader and one small
-land-mask texture. Density changes a shader input rather than rebuilding a
+The globe uses inverse Fibonacci sampling in a fragment shader and small offline
+land and territory textures. Density changes a shader input rather than rebuilding a
 point atlas. Markers and arcs use separate GPU batches only when present.
 
 This design adapts [COBE's renderer](https://github.com/shuding/cobe), with

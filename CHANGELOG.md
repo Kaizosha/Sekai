@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added offline ISO territory materials across the existing globe dots, with
+  a compact Natural Earth mask and theme-independent color inputs.
+- Added optional anchors for territories without a dot at the selected density.
+- Kept map texture ownership inside the renderer and palette updates independent
+  of camera motion.
+
 ## 2.0.0
 
 - Replaced the atlas and generic layer engine with one native Metal globe,
