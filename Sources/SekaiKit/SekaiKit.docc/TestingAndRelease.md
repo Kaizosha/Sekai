@@ -2,8 +2,10 @@
 
 The package's tests cover finite value normalization, camera conventions,
 rotation continuity, lifecycle transitions, typed failures, resource loading,
-and actual Metal output. An unavailable GPU is a verification limitation,
-not evidence that a render test passed.
+and actual Metal output. The dismantling test reserves a queue position so a
+submitted frame finishes after teardown. It checks that the renderer releases
+and that a pending status callback stays cancelled. An unavailable GPU limits
+verification of render tests.
 
 Before publishing a release:
 

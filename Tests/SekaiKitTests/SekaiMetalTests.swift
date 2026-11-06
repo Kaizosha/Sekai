@@ -278,6 +278,61 @@ struct SekaiMetalTests {
     #expect(values == [.ready])
   }
 
+  @Test func dismantlingCancelsPendingStatusAndDrainsQueuedMetalWork() async throws {
+    var renderer: SekaiRenderer? = SekaiRenderer()
+    let hasReleasedRenderer = { [weak renderer] in renderer == nil }
+    let view = SekaiNativeView(
+      frame: .init(x: 0, y: 0, width: 256, height: 256), device: renderer?.device)
+    var statuses: [SekaiRenderStatus] = []
+    let command: any MTLCommandBuffer
+    do {
+      let engine = try #require(renderer)
+      view.renderer = engine
+      view.delegate = engine
+      engine.setAttached(true)
+      let image = try texture(engine)
+      let warmup = try #require(try engine.render(to: image))
+      let gate = try #require(warmup.commandQueue.makeCommandBuffer())
+      // Metal cannot schedule the next buffer until this reserved position commits.
+      gate.enqueue()
+      defer { gate.commit() }
+      var input = SekaiRenderInput()
+      input.activity = .active(rotationSpeed: 0.1)
+      engine.update(input, status: { statuses.append($0) }, camera: { _ in })
+      command = try #require(try engine.render(to: image))
+      #expect(engine.drawsContinuously)
+      #expect(engine.submittedFrames == 2)
+
+      #if os(macOS)
+        SekaiMetalView.dismantleNSView(view, coordinator: engine)
+      #else
+        SekaiMetalView.dismantleUIView(view, coordinator: engine)
+      #endif
+      #expect(command.status == .committed)
+      #expect(view.isPaused && view.delegate == nil && view.renderer == nil)
+    }
+
+    let deadline = ContinuousClock.now + .seconds(3)
+    while command.status != .completed, command.status != .error, ContinuousClock.now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(command.status == .completed)
+    #expect(command.error == nil)
+    #if DEBUG
+      while renderer?.completedFrames != 2, ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      #expect(renderer?.completedFrames == 2)
+    #endif
+    await Task.yield()
+    #expect(statuses.isEmpty)
+    #expect(view.isPaused && view.delegate == nil && view.renderer == nil)
+    #expect(renderer?.drawsContinuously == false)
+    #expect(renderer?.submittedFrames == 2)
+    renderer = nil
+    #expect(hasReleasedRenderer())
+  }
+
   #if os(macOS)
     @Test func attachedNativeViewDrawsThenSuspendsAndReleasesItsRenderer() async throws {
       _ = NSApplication.shared
